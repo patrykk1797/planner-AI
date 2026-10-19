@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>Running Planer AI • iOS 27 Liquid Glass</title>
+    <meta name="description" content="Inteligentny planer biegowy iOS 27 Liquid Glass z modelem Gemini AI, wirtualnym trenerem RundPanda, analizą obuwia, czatem z fizjologiem i czujnikiem smogu AQI na żywo." />
+    <meta property="og:title" content="Running Planer AI • iOS 27 Liquid Glass" />
+    <meta property="og:description" content="Inteligentny planer biegowy iOS 27 Liquid Glass z modelem Gemini AI, wirtualnym trenerem RundPanda, analizą obuwia, czatem z fizjologiem i czujnikiem smogu AQI na żywo." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script>
+      // Environment constraint: HMR is disabled, ignore WebSocket errors
+      window.addEventListener('unhandledrejection', function(event) {
+        var msg = (event && event.reason && (event.reason.message || String(event.reason))) || '';
+        var stack = (event && event.reason && event.reason.stack) || '';
+        if (msg.includes('WebSocket') || msg.includes('vite') || stack.includes('@vite/client')) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      });
+      window.addEventListener('error', function(event) {
+        var msg = (event && event.message) || '';
+        var filename = (event && event.filename) || '';
+        if (msg.includes('WebSocket') || filename.includes('@vite/client')) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
