@@ -22,6 +22,35 @@ interface LiveRunHUDProps {
   showToast: (msg: string) => void;
 }
 
+// Haversine distance in meters
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371e3;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+interface RoutePoint {
+  km: number;
+  lat: number;
+  lon: number;
+  split: string;
+  hr: number;
+}
+
+const ROUTE_POINTS: RoutePoint[] = [
+  { km: 1, lat: 51.8564, lon: 19.4042, split: '5:12', hr: 138 },
+  { km: 2, lat: 51.8578, lon: 19.4065, split: '5:08', hr: 142 },
+  { km: 3, lat: 51.8590, lon: 19.4095, split: '5:04', hr: 146 },
+  { km: 4, lat: 51.8605, lon: 19.4120, split: '5:10', hr: 145 },
+  { km: 5, lat: 51.8618, lon: 19.4150, split: '4:58', hr: 151 },
+];
+
 export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
   isOpen,
   onClose,
@@ -36,45 +65,121 @@ export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
   const [currentHr, setCurrentHr] = useState<number>(142);
   const [currentCadence, setCurrentCadence] = useState<number>(176);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState<boolean>(true);
-  const [isMetronomeEnabled, setIsMetronomeEnabled] = useState<boolean>(false);
   const [activeKmMarker, setActiveKmMarker] = useState<number | null>(null);
+  const [gpsActive, setGpsActive] = useState<boolean>(false);
 
+  // New state for reliability
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [accumulatedTime, setAccumulatedTime] = useState<number>(0);
+  const [isPocketLocked, setIsPocketLocked] = useState<boolean>(false);
+  const [unlockProgress, setUnlockProgress] = useState<number>(0);
+
+  const wakeLockRef = useRef<any>(null);
   const mapRef = useRef<HTMLDivElement>(null);
   const leafletInstance = useRef<any>(null);
+  const polylineRef = useRef<any>(null);
+  const liveCoords = useRef<[number, number][]>([]);
+  const lastPos = useRef<{ lat: number; lon: number } | null>(null);
+  const unlockTimer = useRef<any>(null);
 
-  // Simulated GPS route points (e.g. Park loop in Zgierz / Warsaw)
-  const ROUTE_POINTS = [
-    { km: 1, lat: 51.8569, lon: 19.4064, split: '5:35', hr: 138, cadence: 175, gct: 238 },
-    { km: 2, lat: 51.8590, lon: 19.4100, split: '5:28', hr: 142, cadence: 177, gct: 234 },
-    { km: 3, lat: 51.8610, lon: 19.4140, split: '5:30', hr: 145, cadence: 176, gct: 235 },
-    { km: 4, lat: 51.8635, lon: 19.4080, split: '5:25', hr: 148, cadence: 178, gct: 230 },
-    { km: 5, lat: 51.8600, lon: 19.4040, split: '5:18', hr: 152, cadence: 180, gct: 226 },
-  ];
+  // 1. Screen Wake Lock handler
+  const requestWakeLock = async () => {
+    if ('wakeLock' in navigator) {
+      try {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+      } catch (err) {
+        console.warn('WakeLock error:', err);
+      }
+    }
+  };
 
-  // Stop watch loop
+  const releaseWakeLock = () => {
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release();
+      wakeLockRef.current = null;
+    }
+  };
+
+  // 2. Timer Loop (Timestamp-based)
   useEffect(() => {
     let interval: any = null;
-    if (isRunning) {
+    if (isRunning && startTime) {
       interval = setInterval(() => {
-        setSeconds((s) => s + 1);
-        setDistanceKm((d) => Number((d + 0.0028).toFixed(3))); // ~10 km/h simulation
-      }, 1000);
+        const now = Date.now();
+        const diff = Math.floor((now - startTime + accumulatedTime) / 1000);
+        setSeconds(diff);
+      }, 100); // Higher frequency for smooth UI, but logic is based on Date.now()
+    } else {
+      clearInterval(interval);
     }
     return () => clearInterval(interval);
-  }, [isRunning]);
+  }, [isRunning, startTime, accumulatedTime]);
 
-  // Voice updates every full kilometer or 5 minutes
+  // 3. Geolocation WatchPosition
+  useEffect(() => {
+    let gpsWatchId: number | null = null;
+
+    if (isRunning) {
+      if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+        gpsWatchId = navigator.geolocation.watchPosition(
+          (pos) => {
+            const lat = pos.coords.latitude;
+            const lon = pos.coords.longitude;
+            setGpsActive(true);
+
+            if (lastPos.current) {
+              const dMeters = haversineMeters(lastPos.current.lat, lastPos.current.lon, lat, lon);
+              if (dMeters > 3) {
+                setDistanceKm((prev) => Number((prev + dMeters / 1000).toFixed(3)));
+                liveCoords.current.push([lat, lon]);
+
+                if (polylineRef.current) {
+                  polylineRef.current.setLatLngs(liveCoords.current);
+                }
+                if (leafletInstance.current) {
+                  leafletInstance.current.panTo([lat, lon]);
+                }
+              }
+            } else {
+              liveCoords.current.push([lat, lon]);
+            }
+            lastPos.current = { lat, lon };
+          },
+          () => {
+            setGpsActive(false);
+          },
+          { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+        );
+      }
+
+      // Fallback timer increment simulation
+      const fallbackInterval = setInterval(() => {
+        if (!gpsActive) {
+          setDistanceKm((d) => Number((d + 0.0028).toFixed(3)));
+        }
+      }, 1000);
+
+      return () => {
+        clearInterval(fallbackInterval);
+        if (gpsWatchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
+          navigator.geolocation.clearWatch(gpsWatchId);
+        }
+      };
+    }
+  }, [isRunning, gpsActive]);
+
+  // Voice updates
   useEffect(() => {
     if (isRunning && seconds > 0 && seconds % 120 === 0 && isVoiceEnabled) {
       const paceSec = distanceKm > 0 ? Math.round(seconds / distanceKm) : 330;
       const pMin = Math.floor(paceSec / 60);
       const pSec = paceSec % 60;
-      const speech = `Przebiegłeś ${distanceKm.toFixed(1)} kilometra. Średnie tempo ${pMin} minut ${pSec} sekund na kilometr. Tętno ${currentHr} uderzeń na minutę. Kadencja optymalna ${currentCadence} kroków.`;
+      const speech = `Dystans ${(Number(distanceKm) || 0).toFixed(1)} km. Tempo ${pMin} minut ${pSec} sekund. Tętno ${currentHr} bpm.`;
       speakCoachPolish(speech);
     }
-  }, [seconds, isRunning, distanceKm, currentHr, currentCadence, isVoiceEnabled]);
+  }, [seconds, isRunning, distanceKm, currentHr, isVoiceEnabled]);
 
-  // Initialize Leaflet map
+  // Leaflet Map Init + ResizeObserver
   useEffect(() => {
     if (isOpen && mapRef.current && typeof window !== 'undefined' && (window as any).L && !leafletInstance.current) {
       try {
@@ -82,35 +187,26 @@ export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
         const map = L.map(mapRef.current, { zoomControl: false }).setView([51.8590, 19.4080], 14);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
           maxZoom: 18,
-          attribution: '© OpenStreetMap contributors',
+          attribution: '© OpenStreetMap',
         }).addTo(map);
 
         const accentHex = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ff7a00';
-
-        // Draw street-snapped polyline
         const coords = ROUTE_POINTS.map((p) => [p.lat, p.lon]);
-        L.polyline(coords, { color: accentHex, weight: 4, opacity: 0.85 }).addTo(map);
-
-        // Add 1k, 2k, 3k markers
-        ROUTE_POINTS.forEach((pt) => {
-          const marker = L.circleMarker([pt.lat, pt.lon], {
-            radius: 8,
-            fillColor: '#ffffff',
-            color: accentHex,
-            weight: 3,
-            fillOpacity: 1,
-          }).addTo(map);
-
-          marker.bindPopup(`
-            <div style="font-size:11px; font-weight:bold; color:#0f172a; text-align:center;">
-              <strong>Kilometr ${pt.km}</strong><br/>
-              Międzyczas: ${pt.split} min/km<br/>
-              Tętno: ${pt.hr} bpm | GCT: ${pt.gct} ms
-            </div>
-          `);
-        });
+        polylineRef.current = L.polyline(coords, { color: accentHex, weight: 4, opacity: 0.85 }).addTo(map);
 
         leafletInstance.current = map;
+
+        // ResizeObserver to handle map invalidation
+        const observer = new ResizeObserver(() => {
+          setTimeout(() => {
+            if (leafletInstance.current) {
+              leafletInstance.current.invalidateSize();
+            }
+          }, 150);
+        });
+        observer.observe(mapRef.current);
+
+        return () => observer.disconnect();
       } catch (err) {
         console.warn('Leaflet init error:', err);
       }
@@ -118,7 +214,9 @@ export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
 
     return () => {
       if (leafletInstance.current) {
-        try { leafletInstance.current.remove(); } catch {}
+        try {
+          leafletInstance.current.remove();
+        } catch {}
         leafletInstance.current = null;
       }
     };
@@ -126,129 +224,182 @@ export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
 
   if (!isOpen) return null;
 
-  // Pace calculation
-  const totalPaceSec = distanceKm > 0 ? Math.round(seconds / distanceKm) : 0;
-  const pMin = Math.floor(totalPaceSec / 60);
-  const pSec = totalPaceSec % 60;
-  const paceStr = totalPaceSec > 0 ? `${pMin}:${pSec < 10 ? '0' : ''}${pSec}` : '--:--';
+  const paceSec = distanceKm > 0 ? Math.round(seconds / distanceKm) : 0;
+  const pMin = Math.floor(paceSec / 60);
+  const pSec = paceSec % 60;
+  const paceStr = paceSec > 0 ? `${pMin}:${pSec < 10 ? '0' : ''}${pSec}` : '--:--';
 
   const handleTogglePlay = () => {
+    // iOS Audio/Speech Unlock on first start
+    if (!isRunning && seconds === 0) {
+      soundEngine.playClick(true);
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+      }
+    }
+
     if (!isRunning) {
       setIsRunning(true);
-      soundEngine.playClick(true);
-      if (isVoiceEnabled) {
-        speakCoachPolish('Rozpoczęto rejestrację biegu. Powodzenia!');
-      }
+      setStartTime(Date.now());
+      requestWakeLock();
+      soundEngine.playSuccess();
+      showToast('Bieg rozpoczęty! 🚀');
     } else {
       setIsRunning(false);
+      if (startTime) {
+        setAccumulatedTime((prev) => prev + (Date.now() - startTime));
+      }
+      setStartTime(null);
+      releaseWakeLock();
+      soundEngine.playClick(false);
+      showToast('Bieg wstrzymany ⏸️');
     }
   };
 
   const handleFinishAndSave = () => {
     setIsRunning(false);
-    soundEngine.stopMetronome();
-    setIsMetronomeEnabled(false);
-
-    const durMin = Math.max(1, Math.round(seconds / 60));
-    const dist = Math.max(0.5, distanceKm);
+    releaseWakeLock();
+    const finalDistance = Math.max(0.1, Number(distanceKm.toFixed(2)));
+    const finalDuration = Math.max(1, Math.round(seconds / 60));
+    const selectedShoe = shoes && shoes.length > 0 ? shoes[0].name : 'Asics Novablast 4';
 
     onFinishRun({
-      distanceKm: Number(dist.toFixed(2)),
-      durationMin: durMin,
-      avgPace: paceStr === '--:--' ? '5:35' : paceStr,
+      distanceKm: finalDistance,
+      durationMin: finalDuration,
+      avgPace: paceStr !== '--:--' ? paceStr : '5:20',
       avgHr: currentHr,
       avgCadence: currentCadence,
-      shoeName: profile.selectedShoeId ? (shoes.find((s) => s.id === profile.selectedShoeId)?.name || 'Asics Novablast 4') : 'Asics Novablast 4',
+      shoeName: selectedShoe,
       gctMs: 232,
-      verticalOscillationCm: 7.9,
-      groundContactBalancePercent: '50.1% L / 49.9% P',
-      verticalRatioPercent: 7.4,
+      verticalOscillationCm: 8.2,
     });
 
+    soundEngine.playPandaSound('cheer');
+    showToast(`Ukończono bieg ${finalDistance} km! 🎉`);
     onClose();
   };
 
-  // GPX Export
+  // Pocket Lock Handlers
+  const handleUnlockStart = () => {
+    let progress = 0;
+    unlockTimer.current = setInterval(() => {
+      progress += 5;
+      setUnlockProgress(progress);
+      if (progress >= 100) {
+        clearInterval(unlockTimer.current);
+        setIsPocketLocked(false);
+        setUnlockProgress(0);
+        soundEngine.playClick(true);
+      }
+    }, 100);
+  };
+
+  const handleUnlockEnd = () => {
+    if (unlockTimer.current) {
+      clearInterval(unlockTimer.current);
+      setUnlockProgress(0);
+    }
+  };
+
   const handleExportGPX = () => {
-    const gpxContent = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="Running Planer AI iOS 27" xmlns="http://www.topografix.com/GPX/1/1">
+    const coordsToExport: [number, number][] = liveCoords.current.length > 0 ? liveCoords.current : ROUTE_POINTS.map((p) => [p.lat, p.lon] as [number, number]);
+    const gpxXml = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx creator="TREDA Running" version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
   <trk>
-    <name>Trening z Running Planer AI - ${new Date().toISOString()}</name>
+    <name>TREDA Run ${new Date().toISOString().split('T')[0]}</name>
     <trkseg>
-      ${ROUTE_POINTS.map((pt) => `
-      <trkpt lat="${pt.lat}" lon="${pt.lon}">
-        <ele>190.0</ele>
-        <time>${new Date().toISOString()}</time>
-        <extensions>
-          <hr>${pt.hr}</hr>
-          <cadence>${pt.cadence}</cadence>
-        </extensions>
-      </trkpt>`).join('')}
+${coordsToExport.map(([lat, lon]: [number, number]) => `      <trkpt lat="${lat}" lon="${lon}"><time>${new Date().toISOString()}</time></trkpt>`).join('\n')}
     </trkseg>
   </trk>
 </gpx>`;
 
-    const blob = new Blob([gpxContent], { type: 'application/gpx+xml' });
+    const blob = new Blob([gpxXml], { type: 'application/gpx+xml' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `trening-running-planer-${new Date().toISOString().slice(0, 10)}.gpx`;
+    a.download = `treda_run_${Date.now()}.gpx`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('Plik .GPX wygenerowany i pobrany! 🗺️');
+    showToast('Pobrano plik .GPX! 💾');
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      className="fixed inset-0 bg-black/95 z-50 flex flex-col p-4 animate-ios text-white overflow-y-auto"
-    >
-      {/* Top HUD Bar */}
-      <div className="flex items-center justify-between shrink-0 mb-3">
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 live-pulse"></span>
-          <span className="text-xs font-black uppercase tracking-wider accent-text">
-            Live Run HUD • Moduł 11 & 12
-          </span>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {/* Polish Voice toggle */}
+    <div className="fixed inset-0 bg-black/95 backdrop-blur-2xl z-50 flex flex-col p-4 animate-ios max-w-md mx-auto">
+      {/* Pocket Lock Overlay */}
+      {isPocketLocked && (
+        <div className="fixed inset-0 bg-black/90 z-[60] flex flex-col items-center justify-center p-8 transition-opacity duration-500">
+          <div className="w-24 h-24 rounded-full border-4 border-white/10 flex items-center justify-center relative mb-8">
+            <svg className="w-full h-full absolute inset-0 -rotate-90">
+              <circle
+                cx="48"
+                cy="48"
+                r="44"
+                fill="none"
+                stroke="var(--accent)"
+                strokeWidth="4"
+                strokeDasharray="276"
+                strokeDashoffset={276 - (276 * unlockProgress) / 100}
+                className="transition-all duration-100"
+              />
+            </svg>
+            <span className="text-4xl">🔒</span>
+          </div>
+          <h3 className="text-xl font-black text-white mb-2">Blokada Kieszonkowa</h3>
+          <p className="text-sm text-white/50 text-center mb-12">Przytrzymaj przycisk poniżej przez 2 sekundy, aby odblokować</p>
+          
           <button
-            type="button"
-            onClick={() => {
-              setIsVoiceEnabled(!isVoiceEnabled);
-              showToast(isVoiceEnabled ? 'Głos lektora wyłączony' : 'Polski głos trenera AI aktywny 🎙️');
-            }}
-            className={`px-2.5 py-1 rounded-full text-xs font-bold transition-all ${
-              isVoiceEnabled ? 'liquid-active' : 'liquid-pill txt-muted'
-            }`}
+            onMouseDown={handleUnlockStart}
+            onMouseUp={handleUnlockEnd}
+            onTouchStart={handleUnlockStart}
+            onTouchEnd={handleUnlockEnd}
+            className="w-full py-5 rounded-full bg-white/10 border border-white/20 text-white font-black uppercase tracking-widest active:scale-95 transition-all"
           >
-            {isVoiceEnabled ? '🔊 Głos PL' : '🔇 Mute'}
+            Odblokuj 🔓
           </button>
+        </div>
+      )}
 
-          {/* Close / Minimize */}
+      {/* Top Header */}
+      <div className="flex items-center justify-between border-b border-white/10 pb-2">
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
+          <h2 className="text-sm font-black text-white uppercase tracking-wider">
+            LIVE RUN GPS HUD
+          </h2>
+          {gpsActive && (
+            <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+              🛰️ GPS 1:1
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsPocketLocked(true)}
+            className="px-3 py-1 rounded-full liquid-pill text-[10px] font-bold text-white/70"
+          >
+            🔒 Blokada
+          </button>
           <button
             type="button"
             onClick={onClose}
-            aria-label="Zamknij HUD"
-            className="w-8 h-8 rounded-full liquid-pill flex items-center justify-center font-bold text-xs"
+            className="w-8 h-8 rounded-full liquid-pill flex items-center justify-center text-xs text-white"
           >
             ✕
           </button>
         </div>
       </div>
 
-      {/* Primary Big Metrics Display */}
-      <div className="text-center py-4 space-y-1">
-        <span className="text-[11px] uppercase tracking-widest txt-muted font-bold">Dystans GPS</span>
-        <div className="text-6xl font-black accent-text ios-num tracking-tight">
-          {distanceKm.toFixed(2)} <span className="text-2xl txt-sub font-semibold">km</span>
+      {/* Main Distance Counter */}
+      <div className="text-center my-3 space-y-1">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+          Przebyty Dystans
+        </span>
+        <div className="text-5xl font-black txt-main ios-num tracking-tight">
+          {distanceKm.toFixed(2)} <span className="text-xl text-emerald-400">km</span>
         </div>
 
         {/* Stopwatch Timer */}
-        <div className="text-3xl font-black txt-main ios-num">
+        <div className="text-2xl font-black txt-main ios-num pt-1">
           {Math.floor(seconds / 3600) > 0 ? `${Math.floor(seconds / 3600)}:` : ''}
           {Math.floor((seconds % 3600) / 60) < 10 ? '0' : ''}
           {Math.floor((seconds % 3600) / 60)}:
@@ -258,53 +409,51 @@ export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
       </div>
 
       {/* Grid: Pace, HR, Cadence, GCT */}
-      <div className="grid grid-cols-4 gap-2 text-center my-2">
-        <div className="liquid-glass p-2.5 rounded-2xl border border-white/10">
-          <span className="text-[9px] txt-muted block uppercase font-bold">Śr. Tempo</span>
-          <span className="text-base font-black txt-main ios-num">{paceStr}</span>
+      <div className="grid grid-cols-4 gap-2 text-center my-1">
+        <div className="liquid-glass p-2 rounded-2xl border border-white/10">
+          <span className="text-[9px] txt-muted block uppercase font-bold">Tempo</span>
+          <span className="text-sm font-black txt-main ios-num">{paceStr}</span>
           <span className="text-[8px] txt-muted block">min/km</span>
         </div>
 
-        <div className="liquid-glass p-2.5 rounded-2xl border border-white/10">
+        <div className="liquid-glass p-2 rounded-2xl border border-white/10">
           <span className="text-[9px] txt-muted block uppercase font-bold">Tętno Z2</span>
-          <span className="text-base font-black text-emerald-400 ios-num">{currentHr}</span>
+          <span className="text-sm font-black text-emerald-400 ios-num">{currentHr}</span>
           <span className="text-[8px] txt-muted block">bpm</span>
         </div>
 
-        <div className="liquid-glass p-2.5 rounded-2xl border border-white/10">
+        <div className="liquid-glass p-2 rounded-2xl border border-white/10">
           <span className="text-[9px] txt-muted block uppercase font-bold">Kadencja</span>
-          <span className="text-base font-black text-amber-400 ios-num">{currentCadence}</span>
+          <span className="text-sm font-black text-amber-400 ios-num">{currentCadence}</span>
           <span className="text-[8px] txt-muted block">spm</span>
         </div>
 
-        <div className="liquid-glass p-2.5 rounded-2xl border border-white/10">
+        <div className="liquid-glass p-2 rounded-2xl border border-white/10">
           <span className="text-[9px] txt-muted block uppercase font-bold">GCT</span>
-          <span className="text-base font-black text-cyan-400 ios-num">232</span>
+          <span className="text-sm font-black text-cyan-400 ios-num">232</span>
           <span className="text-[8px] txt-muted block">ms</span>
         </div>
       </div>
 
-      {/* Interactive GPS Leaflet Map (OSRM Street-Snapping) */}
-      <div className="liquid-glass p-3 space-y-2 rounded-3xl my-2 flex-1 min-h-[190px] flex flex-col">
+      {/* Interactive GPS Leaflet Map */}
+      <div className="liquid-glass p-3 space-y-2 rounded-3xl my-2 flex-1 min-h-[180px] flex flex-col">
         <div className="flex items-center justify-between text-xs font-bold">
           <span className="flex items-center gap-1.5">
             <span>🗺️</span>
-            <span>Ślad OSRM 1:1 Street-Snapping</span>
+            <span>Trasa GPS na żywo</span>
           </span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleExportGPX}
-              className="text-[10px] accent-text font-bold hover:underline"
-            >
-              Eksport .GPX 💾
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={handleExportGPX}
+            className="text-[10px] accent-text font-bold hover:underline"
+          >
+            Eksport .GPX 💾
+          </button>
         </div>
 
         <div
           ref={mapRef}
-          className="w-full flex-1 min-h-[140px] rounded-2xl overflow-hidden border border-white/10"
+          className="w-full flex-1 min-h-[130px] rounded-2xl overflow-hidden border border-white/10"
         />
 
         {/* Kilometer markers info bar */}
@@ -317,7 +466,7 @@ export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
                 type="button"
                 onClick={() => {
                   setActiveKmMarker(pt.km);
-                  showToast(`Km ${pt.km}: split ${pt.split}, tętno ${pt.hr} bpm, GCT ${pt.gct} ms`);
+                  showToast(`Km ${pt.km}: split ${pt.split}, tętno ${pt.hr} bpm`);
                 }}
                 className={`w-5 h-5 rounded-full font-bold flex items-center justify-center transition-all ${
                   activeKmMarker === pt.km ? 'accent-bg text-black' : 'liquid-pill txt-sub'
@@ -335,7 +484,7 @@ export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
         <button
           type="button"
           onClick={handleTogglePlay}
-          className={`flex-1 py-4 rounded-full font-black text-sm flex items-center justify-center gap-2 shadow-2xl transition-all ${
+          className={`flex-1 py-3.5 rounded-full font-black text-sm flex items-center justify-center gap-2 shadow-2xl transition-all ${
             isRunning
               ? 'bg-amber-500 text-black hover:brightness-110'
               : 'accent-bg text-black hover:brightness-110'
@@ -347,7 +496,7 @@ export const LiveRunHUD: React.FC<LiveRunHUDProps> = ({
         <button
           type="button"
           onClick={handleFinishAndSave}
-          className="py-4 px-6 rounded-full liquid-pill font-black text-xs text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/40"
+          className="py-3.5 px-6 rounded-full liquid-pill font-black text-xs text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/40"
         >
           Zakończ 🏁
         </button>

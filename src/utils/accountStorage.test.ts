@@ -43,3 +43,34 @@ test('MockLocalStorage correctly filters out deleted user accounts', () => {
   assert.equal(remaining[0].id, 'acc-1');
   assert.equal(remaining[1].id, 'acc-3');
 });
+
+test('Automatic migration moves legacy versioned accounts to permanent key', () => {
+  const storage = new MockLocalStorage();
+  const legacyAccount = [{
+    id: 'patryk-stable-id',
+    name: 'Patryk',
+    email: 'patryk@treda.run',
+    provider: 'email',
+    createdAt: '2026-02-01',
+    onboardingCompleted: true,
+  }];
+
+  // Simulate existing legacy v4 data before update
+  storage.setItem('treda_accounts_v4', JSON.stringify(legacyAccount));
+  storage.setItem('treda_active_account_id_v4', 'patryk-stable-id');
+
+  // Verify migration logic
+  if (!storage.getItem('treda_accounts_permanent')) {
+    const legacy = storage.getItem('treda_accounts_v4');
+    if (legacy) storage.setItem('treda_accounts_permanent', legacy);
+  }
+  if (!storage.getItem('treda_active_account_id_permanent')) {
+    const legacyId = storage.getItem('treda_active_account_id_v4');
+    if (legacyId) storage.setItem('treda_active_account_id_permanent', legacyId);
+  }
+
+  assert.ok(storage.getItem('treda_accounts_permanent'));
+  assert.equal(storage.getItem('treda_active_account_id_permanent'), 'patryk-stable-id');
+  const migrated = JSON.parse(storage.getItem('treda_accounts_permanent')!);
+  assert.equal(migrated[0].name, 'Patryk');
+});

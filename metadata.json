@@ -1,6 +1,6 @@
 {
-  "name": "Running Planer AI",
-  "description": "Inteligentny planer biegowy iOS 27 Liquid Glass z modelem Gemini AI, wirtualnym trenerem RundPanda, analizą obuwia, czatem z fizjologiem i czujnikiem smogu AQI na żywo.",
-  "requestFramePermissions": ["geolocation"],
+  "name": "Treda",
+  "description": "Treda - Inteligentny planer biegowy z modelem Gemini AI, wirtualnym asystentem, analizą obuwia, czatem z fizjologiem i telemetrią.",
+  "requestFramePermissions": ["geolocation", "camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

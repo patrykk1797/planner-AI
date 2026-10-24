@@ -48,11 +48,17 @@ export interface RunLog {
   durationMin: number;
   avgPace: string; // "5:20"
   avgHr: number;
+  maxHr?: number;
   avgCadence: number;
+  elevationGainM?: number;
+  calories?: number;
   shoeName: string;
   notes?: string;
   coachFeedback?: string;
   gctMs?: number; // Ground Contact Time in ms
+  splits?: Array<{ km: number; pace: string; hr: number; elevation: number }>;
+  hrZones?: Array<{ zone: string; percentage: number; timeMin: number }>;
+  vo2MaxEst?: number;
 }
 
 export interface Shoe {
@@ -422,10 +428,10 @@ export function calculateCarbLoading(
 }
 
 /**
- * Module 10: Race Day Fueling Plan
+ * Module 10: Race Day Fueling Plan (5K, 10K, Half-Marathon, Marathon)
  */
 export function calculateFuelingPlan(
-  distanceCategory: 'half' | 'marathon',
+  distanceCategory: '5k' | '10k' | 'half' | 'marathon' | 'ultra',
   targetFinishMinutes: number
 ): {
   morningSchedule: Array<{ timeBeforeRace: string; action: string; details: string }>;
@@ -434,11 +440,32 @@ export function calculateFuelingPlan(
   strategyName: string;
   strategyDesc: string;
 } {
-  const isMarathon = distanceCategory === 'marathon';
-  const carbsPerHour = isMarathon ? 75 : 60;
-  const gelCheckpointsKm = isMarathon
-    ? [6, 12, 18, 24, 30, 36]
-    : [7, 14];
+  let carbsPerHour = 75;
+  let gelCheckpointsKm: number[] = [6, 12, 18, 24, 30, 36];
+  let strategyName = 'Negative Split & Ochrona Glikogenu';
+  let strategyDesc = 'Pierwsze 10% dystansu biegnij 5-8 sekund wolniej od średniej, aby oszczędzić glikogen. Po 60% dystansu stopniowo przyspieszaj.';
+
+  if (distanceCategory === '5k') {
+    carbsPerHour = 30;
+    gelCheckpointsKm = []; // No gels during 5K run
+    strategyName = 'Płynny Start & Maksymalizacja VO2max';
+    strategyDesc = 'Pierwsze 500m w tempie docelowym. Trzymaj rytm w strefie VO2max i wykonaj finisz na ostatnich 800 metrach.';
+  } else if (distanceCategory === '10k') {
+    carbsPerHour = 45;
+    gelCheckpointsKm = [5];
+    strategyName = 'Równe Tempo & Finisz 2km';
+    strategyDesc = 'Idealne trzymanie tempa (Even Pacing) od 1 do 8 km. Żel na 5km zapobiega spadkowi cukru przed mocnym finiszem.';
+  } else if (distanceCategory === 'half') {
+    carbsPerHour = 60;
+    gelCheckpointsKm = [7, 14];
+    strategyName = 'Kontrolowana Strefa 3 & Negative Split';
+    strategyDesc = 'Trzymaj Strefę 3 do 15 km. Żele na 7 km i 14 km z wodą dają ciągły dopływ glukozy do pracujących mięśni.';
+  } else if (distanceCategory === 'ultra') {
+    carbsPerHour = 90;
+    gelCheckpointsKm = [10, 20, 30, 40, 50, 60];
+    strategyName = 'Stały Dopływ Energii & Elektrolity Ultra';
+    strategyDesc = 'Bieg ultra wymaga stałego dostarczania 80-90g węglowodanów na godzinę (żele + napoje węglowodanowe + sole/sód) oraz dyscypliny tętna w Strefie 2.';
+  }
 
   const morningSchedule = [
     {
@@ -453,8 +480,8 @@ export function calculateFuelingPlan(
     },
     {
       timeBeforeRace: '45m przed startem',
-      action: 'Rozgrzewka dynamiczna (ABC Biegowe)',
-      details: '8 min truchtu, wymachy nóg, skipy A/C, 3 rytmiczne przebieżki 60m.',
+      action: 'Rozgrzewka dynamiczna',
+      details: '8 min truchtu, wymachy nóg, mobilność stóp i 3 rytmiczne przebieżki 60m.',
     },
     {
       timeBeforeRace: '15m przed startem',
@@ -467,8 +494,8 @@ export function calculateFuelingPlan(
     morningSchedule,
     gelCheckpointsKm,
     carbsPerHour,
-    strategyName: 'Negative Split (Druga połowa szybsza)',
-    strategyDesc: 'Pierwsze 10% dystansu biegnij 5-8 sekund wolniej od średniej, aby oszczędzić glikogen. Po 60% dystansu stopniowo przyspieszaj.',
+    strategyName,
+    strategyDesc,
   };
 }
 
@@ -681,3 +708,329 @@ export function generateCoachingFeedback(run: {
 
   return { cadenceTip, hrTip, recoveryRecommendation };
 }
+
+/**
+ * Calculates dynamic VO2 Max based on 5K pace, weight change, and smoke-free recovery bonus
+ */
+export function calculateDynamicVo2Max(
+  profile: { time5k: string; smokeFreeDays?: number; weight?: number; targetWeight?: number; vo2max?: number },
+  runs: Array<{ distanceKm: number; avgPace?: string; durationMin?: number; vo2MaxEst?: number }> = []
+): number {
+  if (runs && runs.length > 0) {
+    const latestRun = runs[0];
+    if (latestRun?.vo2MaxEst && Number(latestRun.vo2MaxEst) > 15) {
+      return Number(Number(latestRun.vo2MaxEst).toFixed(1));
+    }
+    if (latestRun?.avgPace) {
+      const parts = latestRun.avgPace.split(':').map((p) => parseInt(p, 10));
+      const paceSec = (parts[0] || 5) * 60 + (parts[1] || 0);
+      if (paceSec > 120 && paceSec < 900) {
+        const paceMin = paceSec / 60;
+        const v = 1000 / paceMin;
+        const rawVo2 = -4.6 + 0.182258 * v + 0.000104 * Math.pow(v, 2);
+        if (!isNaN(rawVo2) && rawVo2 > 20) {
+          return Number(Math.max(25, Math.min(85, rawVo2)).toFixed(1));
+        }
+      }
+    }
+    const runWithVo2 = runs.find((r) => r.vo2MaxEst && Number(r.vo2MaxEst) > 15);
+    if (runWithVo2 && runWithVo2.vo2MaxEst) {
+      return Number(Number(runWithVo2.vo2MaxEst).toFixed(1));
+    }
+  }
+
+  const safeProfile = profile || { time5k: '25:00' };
+  const baseVo2 = estimateVO2MaxFrom5k(safeProfile.time5k || '25:00');
+  const smokeBonus = Math.min(3.5, (safeProfile.smokeFreeDays || 0) * 0.05);
+  const weightDiff = (74.5 - (safeProfile.weight || 74.5)) * 0.4;
+
+  const finalVo2 = (safeProfile.vo2max && safeProfile.vo2max > 20)
+    ? Math.max(safeProfile.vo2max, baseVo2 + smokeBonus + weightDiff)
+    : baseVo2 + smokeBonus + weightDiff;
+
+  return Number(Math.max(25, Math.min(85, finalVo2)).toFixed(1));
+}
+
+export interface PeakPerformanceAnalysis {
+  acuteLoadKm: number;
+  chronicLoadKm: number;
+  acwr: number;
+  status: 'Optymalny (Sweet Spot)' | 'Szybki Skok Formy' | 'Ryzyko Przeciążenia' | 'Regeneracja / Tapering';
+  statusColor: string;
+  peakScore: number; // 0 - 100%
+  advice: string;
+}
+
+export function calculatePeakPerformance(runs: Array<{ distanceKm: number; date?: string }> = []): PeakPerformanceAnalysis {
+  if (!runs || runs.length === 0) {
+    return {
+      acuteLoadKm: 0,
+      chronicLoadKm: 0,
+      acwr: 0,
+      status: 'Regeneracja / Tapering',
+      statusColor: 'text-sky-400 bg-sky-500/20 border-sky-500/40',
+      peakScore: 100,
+      advice: 'Brak zarejestrowanych biegów w ostatnich dniach. Gotowość do startu nowego mikrocyklu!',
+    };
+  }
+
+  const nowMs = Date.now();
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  const sevenDaysAgoMs = nowMs - 7 * ONE_DAY_MS;
+  const twentyEightDaysAgoMs = nowMs - 28 * ONE_DAY_MS;
+
+  let sumLast7Days = 0;
+  let sumLast28Days = 0;
+  let validDateCount = 0;
+
+  for (const r of runs) {
+    const dist = Number(r.distanceKm) || 0;
+    if (dist <= 0) continue;
+
+    if (r.date) {
+      const runDateMs = new Date(r.date).getTime();
+      if (!isNaN(runDateMs)) {
+        validDateCount++;
+        if (runDateMs >= sevenDaysAgoMs) {
+          sumLast7Days += dist;
+        }
+        if (runDateMs >= twentyEightDaysAgoMs) {
+          sumLast28Days += dist;
+        }
+      }
+    }
+  }
+
+  // Fallback if runs lack valid date strings: use recent indices
+  if (validDateCount === 0) {
+    const recentRuns = runs.slice(0, 4);
+    sumLast7Days = recentRuns.reduce((acc, r) => acc + (Number(r.distanceKm) || 0), 0);
+    const monthRuns = runs.slice(0, 16);
+    sumLast28Days = monthRuns.reduce((acc, r) => acc + (Number(r.distanceKm) || 0), 0);
+  }
+
+  const acuteLoad = +(sumLast7Days.toFixed(1));
+  const chronicLoad = +((sumLast28Days / 4).toFixed(1));
+  const acwr = chronicLoad > 0 ? Number((acuteLoad / chronicLoad).toFixed(2)) : (acuteLoad > 0 ? 1.0 : 0);
+
+  let status: PeakPerformanceAnalysis['status'] = 'Optymalny (Sweet Spot)';
+  let statusColor = 'text-emerald-400 bg-emerald-500/20 border-emerald-500/40';
+  let peakScore = 94;
+  let advice = 'Obciążenie treningowe jest w idealnej strefie wzrostu formy. Mięśnie adaptują się optymalnie.';
+
+  if (acwr > 1.5) {
+    status = 'Ryzyko Przeciążenia';
+    statusColor = 'text-rose-400 bg-rose-500/20 border-rose-500/40';
+    peakScore = 62;
+    advice = 'Zbyt gwałtowny wzrost kilometraża! Wprowadź dzień dodatkowej regeneracji.';
+  } else if (acwr > 1.3) {
+    status = 'Szybki Skok Formy';
+    statusColor = 'text-amber-400 bg-amber-500/20 border-amber-500/40';
+    peakScore = 85;
+    advice = 'Wysoka intensywność i szybki przyrost formy. Monitoruj tętno spoczynkowe i sen.';
+  } else if (acwr < 0.8) {
+    status = 'Regeneracja / Tapering';
+    statusColor = 'text-sky-400 bg-sky-500/20 border-sky-500/40';
+    peakScore = 88;
+    advice = 'Niskie obciążenie – świetny moment na wypoczynek przed kluczowymi zawodami.';
+  }
+
+  return {
+    acuteLoadKm: acuteLoad,
+    chronicLoadKm: chronicLoad,
+    acwr,
+    status,
+    statusColor,
+    peakScore,
+    advice,
+  };
+}
+
+/**
+ * Parses duration input in hh:mm:ss, mm:ss, or total minutes format into decimal minutes
+ */
+export function parseHmsToMinutes(input: string): number {
+  if (!input) return 30;
+  const str = input.trim();
+  const parts = str.split(':').map((p) => parseFloat(p) || 0);
+  if (parts.length === 3) {
+    return parts[0] * 60 + parts[1] + parts[2] / 60;
+  }
+  if (parts.length === 2) {
+    return parts[0] + parts[1] / 60;
+  }
+  const raw = parseFloat(str);
+  return isNaN(raw) ? 30 : raw;
+}
+
+/**
+ * Formats decimal minutes into hh:mm:ss or mm:ss string
+ */
+export function formatMinutesToHms(totalMinutes: number): string {
+  const totalSec = Math.max(0, Math.round(totalMinutes * 60));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) {
+    return `${h}:${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+  }
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
+}
+
+export interface ReadinessBatteryAnalysis {
+  score: number; // 0 - 100%
+  status: 'optimal' | 'moderate' | 'low_battery';
+  statusLabel: string;
+  batteryColor: string;
+  batteryBg: string;
+  batteryBorder: string;
+  isLowBatteryWarning: boolean;
+  factors: {
+    acwrImpact: number;
+    sleepImpact: number;
+    rhrImpact: number;
+    fatigueImpact: number;
+  };
+  details: {
+    acwr: number;
+    sleepHours: number;
+    rhr: number;
+    daysSinceHardWorkout: number;
+  };
+  recommendation: string;
+  suggestedAction?: 'rest' | 'recovery_run' | 'proceed';
+}
+
+/**
+ * Calculates Recovery & Readiness Battery (0-100%) inspired by WHOOP, Oura & Garmin Body Battery.
+ * Synthesizes ACWR load, sleep duration, resting heart rate (RHR), and muscle/CNS recovery window.
+ */
+export function calculateReadinessBattery(
+  runs: Array<{ distanceKm: number; date?: string; avgPace?: string; avgHr?: number }> = [],
+  profile?: { sleepHours?: number; restingHeartRate?: number; hrMax?: number }
+): ReadinessBatteryAnalysis {
+  const peak = calculatePeakPerformance(runs);
+  const acwr = peak.acwr;
+  const sleepHours = typeof profile?.sleepHours === 'number' && profile.sleepHours > 0 ? profile.sleepHours : 7.5;
+  const rhr = typeof profile?.restingHeartRate === 'number' && profile.restingHeartRate > 0 ? profile.restingHeartRate : 52;
+
+  // 1. ACWR Impact (-30 to +15)
+  let acwrImpact = 0;
+  if (acwr >= 0.85 && acwr <= 1.25) {
+    acwrImpact = 15; // Optimal sweet spot
+  } else if (acwr > 1.25 && acwr <= 1.45) {
+    acwrImpact = -10; // High acute spike
+  } else if (acwr > 1.45) {
+    acwrImpact = -30; // Danger overload zone
+  } else if (acwr > 0 && acwr < 0.85) {
+    acwrImpact = 5; // Deload / recovery
+  }
+
+  // 2. Sleep Impact (-25 to +25)
+  let sleepImpact = 0;
+  if (sleepHours >= 8.5) {
+    sleepImpact = 25;
+  } else if (sleepHours >= 7.5) {
+    sleepImpact = 18;
+  } else if (sleepHours >= 6.5) {
+    sleepImpact = 5;
+  } else if (sleepHours >= 5.5) {
+    sleepImpact = -12;
+  } else {
+    sleepImpact = -25; // Sleep deprivation
+  }
+
+  // 3. Resting Heart Rate Impact (-15 to +15)
+  let rhrImpact = 0;
+  if (rhr <= 50) {
+    rhrImpact = 15; // Parasympathetic dominance, deep recovery
+  } else if (rhr <= 56) {
+    rhrImpact = 8;
+  } else if (rhr <= 62) {
+    rhrImpact = -4;
+  } else {
+    rhrImpact = -15; // Sympathetic stress / elevated RHR
+  }
+
+  // 4. Time Since Last Hard Workout (-25 to +15)
+  let daysSinceHardWorkout = 3;
+  let fatigueImpact = 10;
+  const nowMs = Date.now();
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+  if (runs && runs.length > 0) {
+    const sorted = [...runs].sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+    const lastRun = sorted[0];
+    if (lastRun && lastRun.date) {
+      const diffDays = Math.max(0, (nowMs - new Date(lastRun.date).getTime()) / ONE_DAY_MS);
+      daysSinceHardWorkout = Math.round(diffDays * 10) / 10;
+
+      const dist = Number(lastRun.distanceKm) || 0;
+      const hr = Number(lastRun.avgHr) || 150;
+      const isHard = dist >= 10 || hr >= 165;
+
+      if (diffDays < 1) {
+        fatigueImpact = isHard ? -25 : -10;
+      } else if (diffDays < 2) {
+        fatigueImpact = isHard ? -5 : 10;
+      } else {
+        fatigueImpact = 15; // Supercompensation
+      }
+    }
+  }
+
+  // Aggregate Base 50 + Factors
+  let rawScore = 50 + acwrImpact + sleepImpact + rhrImpact + fatigueImpact;
+  const score = Math.max(12, Math.min(100, Math.round(rawScore)));
+
+  let status: 'optimal' | 'moderate' | 'low_battery' = 'moderate';
+  let statusLabel = 'Umiarkowana Gotowość';
+  let batteryColor = 'text-amber-400';
+  let batteryBg = 'bg-amber-500/15';
+  let batteryBorder = 'border-amber-500/30';
+  let recommendation = 'Układ nerwowy w normie. Możesz zrealizować zaplanowany trening tlenowy.';
+  let suggestedAction: 'rest' | 'recovery_run' | 'proceed' = 'proceed';
+
+  if (score >= 78) {
+    status = 'optimal';
+    statusLabel = 'Pełna Bateria / Gotowość PRO';
+    batteryColor = 'text-emerald-400';
+    batteryBg = 'bg-emerald-500/15';
+    batteryBorder = 'border-emerald-500/30';
+    recommendation = 'Optymalna regeneracja! Ciało jest w oknie superkompensacji – idealny moment na mocny akcent lub interwały.';
+    suggestedAction = 'proceed';
+  } else if (score < 45) {
+    status = 'low_battery';
+    statusLabel = 'Rozładowana Bateria (Wysokie Zmęczenie)';
+    batteryColor = 'text-rose-400';
+    batteryBg = 'bg-rose-500/15';
+    batteryBorder = 'border-rose-500/40';
+    recommendation = 'Wysokie zmęczenie mięśniowe lub krążeniowe! Zalecamy autokorektę planu na dziś: zamiana akcentu na regenerację Z1 lub dzień wolny.';
+    suggestedAction = acwr > 1.45 ? 'rest' : 'recovery_run';
+  }
+
+  return {
+    score,
+    status,
+    statusLabel,
+    batteryColor,
+    batteryBg,
+    batteryBorder,
+    isLowBatteryWarning: score < 45,
+    factors: {
+      acwrImpact,
+      sleepImpact,
+      rhrImpact,
+      fatigueImpact,
+    },
+    details: {
+      acwr,
+      sleepHours,
+      rhr,
+      daysSinceHardWorkout,
+    },
+    recommendation,
+    suggestedAction,
+  };
+}
+

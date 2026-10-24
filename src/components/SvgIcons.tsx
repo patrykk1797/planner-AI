@@ -45,6 +45,34 @@ export const SvgShoeIcon: React.FC<IconProps> = ({ className = '', size = 20 }) 
   </svg>
 );
 
+export const SvgPandaFace: React.FC<IconProps> = ({ className = '', size = 14 }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    className={`inline-block shrink-0 ${className}`}
+    aria-hidden="true"
+  >
+    {/* Panda Ears */}
+    <circle cx="5" cy="5.5" r="3.5" fill="currentColor" />
+    <circle cx="19" cy="5.5" r="3.5" fill="currentColor" />
+    {/* Panda Head Base */}
+    <ellipse cx="12" cy="13" rx="8.5" ry="8" fill="white" stroke="currentColor" strokeWidth="1.8" />
+    {/* Dark Eye Patches */}
+    <ellipse cx="8.5" cy="12" rx="2.2" ry="2.6" transform="rotate(-18 8.5 12)" fill="#0f172a" />
+    <ellipse cx="15.5" cy="12" rx="2.2" ry="2.6" transform="rotate(18 15.5 12)" fill="#0f172a" />
+    {/* Sparkle White Catchlights */}
+    <circle cx="9" cy="11.2" r="0.8" fill="white" />
+    <circle cx="15" cy="11.2" r="0.8" fill="white" />
+    {/* Cute Nose */}
+    <ellipse cx="12" cy="15.2" rx="1.5" ry="1" fill="#0f172a" />
+    {/* Cheerful Mouth */}
+    <path d="M10.5 17.2c.9.7 2.1.7 3 0" stroke="#0f172a" strokeWidth="1.3" strokeLinecap="round" />
+  </svg>
+);
+
 export const SvgPandaIcon: React.FC<IconProps> = ({ className = '', size = 20 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
     <circle cx="12" cy="13" r="8" />
@@ -85,4 +113,30 @@ export const SvgSettingsIcon: React.FC<IconProps> = ({ className = '', size = 20
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
   </svg>
 );
+
+export const SvgChatAiIcon: React.FC<IconProps> = ({ className = '', size = 22 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+    <path d="M12 8v6M9 11h6" />
+  </svg>
+);
+
+export const SvgTrophyIcon: React.FC<IconProps> = ({ className = '', size = 20 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+    <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+    <path d="M4 22h16" />
+    <path d="M10 14.66V17c0 .55-.45 1-1 1H8c-.55 0-1 .45-1 1v1c0 .55.45 1 1 1h8c.55 0 1-.45 1-1v-1c0-.55-.45-1-1-1h-1c-.55 0-1-.45-1-1v-2.34" />
+    <path d="M6 4h12v6a6 6 0 0 1-12 0V4z" />
+  </svg>
+);
+
+export const SvgBodyGearIcon: React.FC<IconProps> = ({ className = '', size = 20 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M4 17h16a1 1 0 0 0 1-1v-2c-2-2-4-2-6-3l-5-4a4 4 0 0 0-3-1H6a3 3 0 0 0-3 3v7a1 1 0 0 0 1 1z" />
+    <circle cx="16" cy="7" r="2.5" />
+    <path d="M14 12v-2a2 2 0 0 1 2-2h0a2 2 0 0 1 2 2v2" />
+  </svg>
+);
+
 

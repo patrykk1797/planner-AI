@@ -7,6 +7,7 @@ import {
   evaluateAirQuality,
 } from '../utils/runningMath.ts';
 import { PAIN_ZONES_DATABASE, soundEngine } from '../utils/defaults.ts';
+import { PandaMascot25D } from './PandaMascot25D.tsx';
 
 interface PandaHealthViewProps {
   profile: RunnerProfile;
@@ -75,14 +76,21 @@ export const PandaHealthView: React.FC<PandaHealthViewProps> = ({
   };
 
   const handleSelectPain = (pain: PainZone) => {
-    setSelectedPainId(pain.id);
-    const updated = profile.activePainZones?.includes(pain.id)
-      ? profile.activePainZones.filter((id) => id !== pain.id)
-      : [...(profile.activePainZones || []), pain.id];
+    const isCurrentlyActive = selectedPainId === pain.id || profile.activePainZones?.includes(pain.id);
 
-    onUpdateProfile({ activePainZones: updated });
-    soundEngine.playClick(true);
-    showToast(`Aktywowano protokół rehabilitacyjny dla: ${pain.label}`);
+    if (isCurrentlyActive) {
+      setSelectedPainId(null);
+      const updated = (profile.activePainZones || []).filter((id) => id !== pain.id);
+      onUpdateProfile({ activePainZones: updated });
+      soundEngine.playClick(true);
+      showToast(`Odkliknięto ból: ${pain.label} - wyczyszczono protokół! 👍`);
+    } else {
+      setSelectedPainId(pain.id);
+      const updated = [...(profile.activePainZones || []).filter((id) => id !== pain.id), pain.id];
+      onUpdateProfile({ activePainZones: updated });
+      soundEngine.playClick(true);
+      showToast(`Aktywowano protokół rehabilitacyjny dla: ${pain.label}`);
+    }
   };
 
   return (
@@ -92,7 +100,7 @@ export const PandaHealthView: React.FC<PandaHealthViewProps> = ({
         <div className="flex items-center justify-between">
           <div>
             <span className="text-[10px] font-black uppercase tracking-wider accent-text">
-              Moduł 6, 13, 14, 15 & 16
+              GARDEROBA, ZDROWIE & REHABILITACJA
             </span>
             <h2 className="text-base font-bold txt-main">Ekosystem RunPanda & Zdrowie</h2>
           </div>
@@ -173,68 +181,25 @@ export const PandaHealthView: React.FC<PandaHealthViewProps> = ({
               <strong className="accent-text">{profile.activePandaGear.bg}</strong>
             </div>
 
-            {/* Vector SVG Panda with Wardrobe Layering */}
-            <div
-              onClick={handlePokePanda}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') handlePokePanda();
-              }}
-              className="w-48 h-48 mx-auto cursor-pointer group select-none relative flex items-center justify-center"
-              title="Dotknij Pandę!"
-            >
-              <svg viewBox="0 0 200 200" className={`w-full h-full transition-transform ${pandaMood !== 'idle' ? 'scale-110' : 'group-hover:scale-105'} panda-float`}>
-                {/* Aura / Glow */}
-                <circle cx="100" cy="100" r="85" fill="var(--accent)" fillOpacity="0.08" />
-
-                {/* Panda Body */}
-                <ellipse cx="100" cy="130" rx="60" ry="50" fill="#f8fafc" stroke="#090b10" strokeWidth="4" />
-                <ellipse cx="100" cy="135" rx="40" ry="32" fill="#e2e8f0" />
-
-                {/* Ears */}
-                <circle cx="55" cy="55" r="22" fill="#090b10" />
-                <circle cx="145" cy="55" r="22" fill="#090b10" />
-
-                {/* Head */}
-                <ellipse cx="100" cy="80" rx="52" ry="44" fill="#ffffff" stroke="#090b10" strokeWidth="4" />
-
-                {/* Eye Patches */}
-                <ellipse cx="78" cy="78" rx="14" ry="17" fill="#090b10" transform="rotate(-15 78 78)" />
-                <ellipse cx="122" cy="78" rx="14" ry="17" fill="#090b10" transform="rotate(15 122 78)" />
-                <circle cx="79" cy="76" r="4.5" fill="#ffffff" />
-                <circle cx="121" cy="76" r="4.5" fill="#ffffff" />
-
-                {/* Nose & Mouth */}
-                <ellipse cx="100" cy="92" rx="9" ry="6" fill="#090b10" />
-                <path d="M94 98 Q100 106 106 98" stroke="#090b10" strokeWidth="3" fill="none" strokeLinecap="round" />
-
-                {/* Paws */}
-                <ellipse cx="45" cy="125" rx="16" ry="24" fill="#090b10" transform={pandaMood === 'biceps' ? 'rotate(45 45 125)' : 'rotate(-10 45 125)'} />
-                <ellipse cx="155" cy="125" rx="16" ry="24" fill="#090b10" transform={pandaMood === 'biceps' ? 'rotate(-45 155 125)' : 'rotate(10 155 125)'} />
-                <ellipse cx="68" cy="170" rx="18" ry="12" fill="#090b10" />
-                <ellipse cx="132" cy="170" rx="18" ry="12" fill="#090b10" />
-
-                {/* Wardrobe Layer 1: Running Headband / Cap */}
-                {profile.activePandaGear.gear.includes('Czapeczka') && (
-                  <path d="M50 62 Q100 38 150 62 L152 70 Q100 48 48 70 Z" fill="var(--accent)" />
-                )}
-
-                {/* Birthday Crown */}
-                {birthdayActive && (
-                  <polygon points="75,45 85,25 100,40 115,25 125,45" fill="#fbbf24" stroke="#d97706" strokeWidth="2" />
-                )}
-
-                {/* Bamboo held */}
-                {pandaMood === 'eating' && (
-                  <rect x="70" y="105" width="12" height="45" rx="4" fill="#22c55e" stroke="#15803d" strokeWidth="2" transform="rotate(25 70 105)" />
-                )}
-              </svg>
-
-              <span className="absolute bottom-0 text-[10px] font-bold accent-text bg-black/60 px-2.5 py-0.5 rounded-full">
-                Dotknij Pandy (Touch & Poke) 👆
-              </span>
-            </div>
+              {/* Redesigned 2.5D Canvas Panda with Touch & Petting Physics */}
+              <div className="flex flex-col items-center justify-center">
+                <PandaMascot25D
+                  stateMode={
+                    pandaMood === 'eating'
+                      ? 'eating'
+                      : pandaMood === 'biceps' || pandaMood === 'jump'
+                      ? 'running'
+                      : pandaMood === 'happy'
+                      ? 'proud'
+                      : 'idle'
+                  }
+                  onPoke={() => handlePokePanda()}
+                  className="w-52 h-52 mx-auto"
+                />
+                <span className="text-[10px] font-bold accent-text bg-black/60 px-2.5 py-0.5 rounded-full mt-1">
+                  Dotknij lub pogłaszcz Pandę 2.5D 👆
+                </span>
+              </div>
 
             {/* Dynamic speech bubble */}
             <div className="liquid-pill p-3 text-xs txt-main font-medium border border-white/10 relative">
@@ -269,7 +234,7 @@ export const PandaHealthView: React.FC<PandaHealthViewProps> = ({
             <div className="flex items-center justify-between">
               <div>
                 <span className="text-[10px] font-black uppercase tracking-wider accent-text">
-                  Moduł 13 • Wirtualny Fizjoterapeuta
+                  WIRTUALNY FIZJOTERAPEUTA AI
                 </span>
                 <h3 className="text-base font-bold txt-main">Interaktywna Mapa Bólu Ciała</h3>
               </div>
@@ -348,7 +313,7 @@ export const PandaHealthView: React.FC<PandaHealthViewProps> = ({
             <div className="flex items-center justify-between">
               <div>
                 <span className="text-[10px] font-black uppercase tracking-wider accent-text">
-                  Moduł 15 • Warunki Środowiskowe
+                  WARUNKI ŚRODOWISKOWE & POGODA
                 </span>
                 <h3 className="text-sm font-bold txt-main">Pogodowy Korektor Tempa & Ubiór</h3>
               </div>
@@ -380,7 +345,7 @@ export const PandaHealthView: React.FC<PandaHealthViewProps> = ({
             >
               <div>
                 <span className="text-[10px] font-black uppercase tracking-wider accent-text">
-                  Moduł 14 • Opcjonalne Czynniki
+                  REGENERACJA & CZYNNIKI ZDROWOTNE
                 </span>
                 <h3 className="text-sm font-bold txt-main">Leki Regulujące Tętno & Regeneracja</h3>
               </div>
@@ -443,7 +408,7 @@ export const PandaHealthView: React.FC<PandaHealthViewProps> = ({
           <div className="liquid-glass p-4 space-y-3">
             <div>
               <span className="text-[10px] font-black uppercase tracking-wider accent-text">
-                Moduł 16 • Wykresy Wektorowe SVG
+                ANALIZA & DYNAMIKA PROGRESU
               </span>
               <h3 className="text-sm font-bold txt-main">Progresja Tempa i Tętna w Czasie</h3>
             </div>

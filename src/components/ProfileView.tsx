@@ -196,11 +196,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
               <div className="text-center py-2 space-y-1">
                 <span className="text-[10px] uppercase font-bold tracking-widest txt-muted">Ostatni Bieg</span>
-                <div className="text-3xl font-black accent-text ios-num">
-                  {lastRun ? `${lastRun.distanceKm} KM` : '7.2 KM'}
+                <div className="text-2xl font-black accent-text ios-num">
+                  {lastRun ? `${lastRun.distanceKm} KM` : 'Brak Biegów'}
                 </div>
                 <div className="text-xs font-semibold txt-sub">
-                  Tempo: {lastRun ? `${lastRun.avgPace} min/km` : '5:41 min/km'} • HR: {lastRun ? `${lastRun.avgHr} bpm` : '142 bpm'}
+                  {lastRun ? `Tempo: ${lastRun.avgPace} min/km • HR: ${lastRun.avgHr} bpm` : 'Dodaj swój pierwszy trening!'}
                 </div>
               </div>
 
@@ -211,7 +211,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
                 <div className="liquid-pill p-2">
                   <span className="text-[9px] txt-muted block">Kadencja</span>
-                  <span className="font-black txt-main">{lastRun ? `${lastRun.avgCadence} spm` : '177 spm'}</span>
+                  <span className="font-black txt-main">{lastRun ? `${lastRun.avgCadence} spm` : '-'}</span>
                 </div>
               </div>
 

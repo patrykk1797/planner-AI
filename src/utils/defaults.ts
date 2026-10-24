@@ -7,6 +7,7 @@ export const PATRYK_PRESET: RunnerProfile = {
   gender: 'M',
   weight: 74.5,
   targetWeight: 70.0,
+  height: 180,
   city: 'Zgierz',
   weeklyKm: 32,
   time5k: '26:43',
@@ -29,6 +30,8 @@ export const PATRYK_PRESET: RunnerProfile = {
   activePainZones: [],
   accentColor: 'orange',
   theme: 'dark',
+  isPro: true,
+  subscriptionTier: 'PRO',
 };
 
 export const BEGINNER_PRESET: RunnerProfile = {
@@ -37,6 +40,7 @@ export const BEGINNER_PRESET: RunnerProfile = {
   gender: 'M',
   weight: 82.0,
   targetWeight: 76.0,
+  height: 178,
   city: 'Warszawa',
   weeklyKm: 18,
   time5k: '32:30',
@@ -91,54 +95,9 @@ export const CLEAN_PRESET: RunnerProfile = {
   theme: 'dark',
 };
 
-export const DEFAULT_RACES_2027: RaceSlot[] = [
-  {
-    id: 'race-1',
-    distanceCategory: '5k',
-    name: 'Parkrun Park Miejski w Zgierzu',
-    city: 'Zgierz',
-    date: '2027-03-20',
-    distanceKm: 5.0,
-    role: 'Sprawdzian Szybkości',
-    profile: 'Płaska/Atestowana',
-    targetTime: '24:59',
-  },
-  {
-    id: 'race-2',
-    distanceCategory: '10k',
-    name: 'Bieg Ulicą Piotrkowską Rossmann Run',
-    city: 'Łódź',
-    date: '2027-05-22',
-    distanceKm: 10.0,
-    role: 'Start Kontrolny B',
-    profile: 'Płaska/Atestowana',
-    targetTime: '52:30',
-  },
-  {
-    id: 'race-3',
-    distanceCategory: 'half',
-    name: '21. Półmaraton Warszawski',
-    city: 'Warszawa',
-    date: '2027-03-28',
-    distanceKm: 21.097,
-    role: 'Główny Cel Sezonu A',
-    profile: 'Płaska/Atestowana',
-    targetTime: '1:54:30',
-  },
-  {
-    id: 'race-4',
-    distanceCategory: 'marathon',
-    name: 'DOZ Maraton Łódź 2027',
-    city: 'Łódź',
-    date: '2027-04-18',
-    distanceKm: 42.195,
-    role: 'Główny Cel Sezonu A',
-    profile: 'Płaska/Atestowana',
-    targetTime: '3:59:00',
-  },
-];
+export const DEFAULT_RACES_2027: RaceSlot[] = [];
 
-// 12 Market Brands Shoes Catalog
+// 12 Market Brands Shoes Catalog with Advanced Biomechanics & Training Purposes
 export const DEFAULT_SHOES: Shoe[] = [
   {
     id: 'shoe-1',
@@ -154,6 +113,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 7,
     cushion: 'Sprężysta FF BLAST+ ECO',
     idealFor: 'Codzienne wybiegania, tempo run i długie wybiegania w Z2',
+    cushionLevel: 'Maksymalna (Max Cushion)',
+    dynamicsLevel: 'Wysoka (Superfoam)',
+    stabilityType: 'Stopa Neutralna (Poszerzona platforma)',
+    trainingPurposes: ['wolne_wybieganie', 'tempo', 'long_run', 'treningowo_startowe'],
+    recommendedDistance: '10 km - Maraton (10 - 42.2 km)',
+    plateType: 'Brak płytki (Kołyska Rocker)',
+    surfaceType: 'Asfalt / Chodnik & Park miejski',
+    foamTechnology: 'FF BLAST+ ECO (20% biosurowców)',
+    dropDescription: 'Drop 8 mm — uniwersalny kąt przetoczenia odciążający mięśnie płaszczkowate łydki i wspierający płynne przejście z pięty na palce.',
     aiVerdict: 'Idealny wół roboczy dla biegacza 70–80 kg. Geometria trampoliny wspiera płynne przetoczenie.',
   },
   {
@@ -170,6 +138,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 5,
     cushion: 'Pianka ZoomX + Pełna płytka Flyplate z włókna węglowego',
     idealFor: 'Zawody 5K, 10K, Półmaraton i Maraton',
+    cushionLevel: 'Wysoka responsywna',
+    dynamicsLevel: 'Maksymalna (Płytka Karbonowa)',
+    stabilityType: 'Wąska platforma startowa (Dla wprawnych biegaczy)',
+    trainingPurposes: ['startowe', 'tempo'],
+    recommendedDistance: '5 km - Maraton (Race Day)',
+    plateType: 'Karbon (Pełnowymiarowa płytka Flyplate)',
+    surfaceType: 'Asfalt & Atestowane trasy uliczne',
+    foamTechnology: '100% Pełna pianka ZoomX (Pebax)',
+    dropDescription: 'Drop 8 mm z karbonowym rockerem — generuje maksymalną dźwignię wybicia i oszczędza glikogen mięśniowy.',
     aiVerdict: 'Maksymalny zwrot energii (~85%). Wymaga mocnego ścięgna Achillesa i stabilnej kadencji (>168 spm).',
   },
   {
@@ -186,6 +163,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 8,
     cushion: 'Lightstrike Pro + Pręty z włókna szklanego EnergyRods 2.0',
     idealFor: 'Biegi tempowe, interwały i starty kontrolne',
+    cushionLevel: 'Wysoka / Dynamiczna',
+    dynamicsLevel: 'Wysoka (Pręty EnergyRods 2.0)',
+    stabilityType: 'Stopa Neutralna z prowadzeniem przodostopia',
+    trainingPurposes: ['tempo', 'treningowo_startowe', 'long_run'],
+    recommendedDistance: '10 km - Półmaraton (10 - 21.1 km)',
+    plateType: 'Pręty z włókna szklanego (EnergyRods 2.0)',
+    surfaceType: 'Asfalt & Bieżnia lekkoatletyczna',
+    foamTechnology: 'Lightstrike Pro (góra) + Lightstrike 2.0 (dół)',
+    dropDescription: 'Drop 7 mm — wspiera biomechaniczne wybicie ze śródstopia przy tempach progowych poniżej 5:00/km.',
     aiVerdict: 'Świetna dynamika bez przesadnej agresywności. Pręty odciążają powięź podeszwową.',
   },
   {
@@ -202,6 +188,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 8,
     cushion: 'Maksymalistyczna formowana ciśnieniowo pianka EVA CMEVA',
     idealFor: 'Biegi regeneracyjne i długie wybiegania niedzielne',
+    cushionLevel: 'Maksymalna (Max Cushion)',
+    dynamicsLevel: 'Umiarkowana (Płynna kołyska Meta-Rocker)',
+    stabilityType: 'Stopa Neutralna (Szerokie łoże stopy Active Foot Frame)',
+    trainingPurposes: ['wolne_wybieganie', 'long_run'],
+    recommendedDistance: '15 km - Ultra (Ochrona stawów)',
+    plateType: 'Brak płytki (Elastyczność pianki)',
+    surfaceType: 'Twardy asfalt, Chodnik, Beton',
+    foamTechnology: 'Formowana ciśnieniowo pianka CMEVA',
+    dropDescription: 'Niski drop 5 mm — wymusza naturalne lądowanie pod środkiem ciężkości ciała i drastycznie redukuje siły uderzenia w rzepkę kolanową.',
     aiVerdict: 'Niski drop (5 mm) wymusza lądowanie na śródstopiu i odciąża kolano przy masie >75 kg.',
   },
   {
@@ -218,6 +213,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 7,
     cushion: 'Pianka PWRRUN PB (PEBA) + Skrzydełkowa płytka nylonowa',
     idealFor: 'Interwały, tempo run i starty 5K/Półmaraton',
+    cushionLevel: 'Wysoka / Sprężysta',
+    dynamicsLevel: 'Wysoka (Płytka nylonowa Speedroll)',
+    stabilityType: 'Stopa Neutralna ze skrzydełkami centrującymi płytki',
+    trainingPurposes: ['tempo', 'treningowo_startowe', 'startowe'],
+    recommendedDistance: '5 km - Półmaraton (Biegi z akcentem)',
+    plateType: 'Nylonowa płytka ze skrzydełkami bocznymi',
+    surfaceType: 'Asfalt & Bieżnia lekkoatletyczna',
+    foamTechnology: 'Koralikowa pianka PWRRUN PB (Pebax)',
+    dropDescription: 'Drop 8 mm z technologią Speedroll — zapewnia naturalne przetoczenie i łagodne przejście w fazę odbicia.',
     aiVerdict: 'Płytka nylonowa wybacza drobne błędy techniki znacznie lepiej niż sztywny karbon.',
   },
   {
@@ -234,6 +238,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 7,
     cushion: 'Ultra-miękka pianka Fresh Foam X',
     idealFor: 'Maksymalny komfort na regeneracyjnych wybieganiach',
+    cushionLevel: 'Maksymalna (Ultra-Soft)',
+    dynamicsLevel: 'Umiarkowana / Poduszkowa',
+    stabilityType: 'Stopa Neutralna (Szeroka podstawa śródstopia)',
+    trainingPurposes: ['wolne_wybieganie', 'long_run'],
+    recommendedDistance: 'Każdy dystans regeneracyjny (5 - 35 km)',
+    plateType: 'Brak płytki',
+    surfaceType: 'Asfalt, Chodniki, Kostka brukowa',
+    foamTechnology: 'Fresh Foam X (Injected EVA o niskiej gęstości)',
+    dropDescription: 'Drop 6 mm — połączenie miękkości pianki z bezpieczną pozycją ścięgna Achillesa na wolnych kilometrach.',
     aiVerdict: 'Pianka poduszkowa chroni stawy i piszczele przed mikrourazami po mocnych akcentach.',
   },
   {
@@ -250,6 +263,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 9,
     cushion: 'Pianka DNA LOFT v3 nasycana azotem',
     idealFor: 'Codzienny trening objętościowy w strefie tlenowej',
+    cushionLevel: 'Wysoka zrównoważona',
+    dynamicsLevel: 'Umiarkowana / Niezawodna',
+    stabilityType: 'Bardzo stabilna platforma neutralna',
+    trainingPurposes: ['wolne_wybieganie', 'long_run'],
+    recommendedDistance: '5 km - Półmaraton (Baza kilometrowa)',
+    plateType: 'Brak płytki',
+    surfaceType: 'Asfalt, Szuter parkowy, Twarde ścieżki',
+    foamTechnology: 'DNA LOFT v3 (Azotowa pianka nitro)',
+    dropDescription: 'Wysoki drop 12 mm — maksymalnie odciąża ścięgno Achillesa, mięsień brzuchaty i płaszkowaty u osób lądujących na pięcie.',
     aiVerdict: 'Wysoki drop (12 mm) bardzo mocno odciąża ścięgno Achillesa i mięsień płaszczkowaty.',
   },
   {
@@ -266,6 +288,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 8,
     cushion: 'Nitro Elite + Płytka PWRPLATE + Guma PUMAGRIP',
     idealFor: 'Uniwersalny startowo-treningowy na mokre nawierzchnie',
+    cushionLevel: 'Wysoka sprężysta',
+    dynamicsLevel: 'Wysoka (Płytka kompozytowa PWRPLATE)',
+    stabilityType: 'Stopa Neutralna z usztywnieniem wzdłużnym',
+    trainingPurposes: ['tempo', 'treningowo_startowe', 'long_run', 'startowe'],
+    recommendedDistance: '10 km - Maraton (Każda pogoda)',
+    plateType: 'Płytka węglowo-kompozytowa PWRPLATE',
+    surfaceType: 'Mokry asfalt, Deszcz, Zmienna przyczepność',
+    foamTechnology: 'Nitro Elite (Pianka PEBA nasycana azotem)',
+    dropDescription: 'Drop 10 mm z płytką kompozytową — chroni tyłostopie przy jednoczesnym generowaniu mocnego wybicia.',
     aiVerdict: 'Najlepsza przyczepność na mokrym asfalcie w całej stawce biegowej.',
   },
   {
@@ -282,6 +313,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 8,
     cushion: 'Chmury CloudTec z pianki Helion + Płytka Speedboard',
     idealFor: 'Dynamiczne wybiegania miejskie i ochrona przed twardym asfaltem',
+    cushionLevel: 'Maksymalna (Monster Cushion)',
+    dynamicsLevel: 'Wysoka (Płytka Speedboard)',
+    stabilityType: 'Stopa Neutralna z szeroką bazą CloudTec',
+    trainingPurposes: ['wolne_wybieganie', 'long_run', 'tempo'],
+    recommendedDistance: '10 km - Półmaraton',
+    plateType: 'Płytka termoplastyczna Speedboard®',
+    surfaceType: 'Asfalt miejski & Kostka brukowa',
+    foamTechnology: 'Helion™ Superfoam + Poduszki CloudTec®',
+    dropDescription: 'Drop 6 mm — niski profil dropu ułatwia toczenie po sztywnej płytce Speedboard, redukując zmęczenie śródstopia.',
     aiVerdict: 'Efektowna sprężystość i sztywna kołyska ułatwiająca toczenie stopy.',
   },
   {
@@ -298,6 +338,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 9,
     cushion: 'Płytka Wave z plastiku rycynowego + Pianka Enerzy NXT',
     idealFor: 'Klasyczny trening dla biegaczy lądujących na pięcie',
+    cushionLevel: 'Wysoka stabilna',
+    dynamicsLevel: 'Umiarkowana sprężysta',
+    stabilityType: 'Bardzo stabilna neutralna (Płytka Mizuno Wave)',
+    trainingPurposes: ['wolne_wybieganie', 'long_run'],
+    recommendedDistance: '10 km - Maraton',
+    plateType: 'Płytka Wave (Strukturalne rozproszenie sił)',
+    surfaceType: 'Asfalt & Twarde drogi utwardzone',
+    foamTechnology: 'Mizuno Enerzy NXT + Bio-Plate Wave',
+    dropDescription: 'Drop 12 mm — klasyczna japońska geometria rozpraszająca uderzenie pięty na boki i stabilizująca staw skokowy.',
     aiVerdict: 'Niezniszczalna platforma o legendarnej trwałości podeszwy.',
   },
   {
@@ -314,6 +363,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 7,
     cushion: 'Zerowy drop (Zero Drop) + Pianka Altra EGO MAX',
     idealFor: 'Naturalny bieg, wzmacnianie mięśni stóp i zapobieganie haluksom',
+    cushionLevel: 'Wysoka naturalna (30 mm stos podeszwy)',
+    dynamicsLevel: 'Naturalna / Responsywna',
+    stabilityType: 'Szeroka stopa FootShape™ (Naturalne rozstawienie palców)',
+    trainingPurposes: ['wolne_wybieganie', 'tempo', 'long_run'],
+    recommendedDistance: '5 km - Półmaraton (Bieganie naturalne)',
+    plateType: 'Brak płytki (Pełna elastyczność łuku stopy)',
+    surfaceType: 'Asfalt, Ścieżki parkowe, Lekki szuter',
+    foamTechnology: 'Altra EGO™ MAX',
+    dropDescription: 'Zero Drop (0 mm) — pięta i palce na tej samej wysokości (30 mm). Wymusza prawidłową postawę i lądowanie na śródstopiu.',
     aiVerdict: 'Zero drop wymaga stopniowej adaptacji łydki (2–4 tygodnie), aby nie przeciążyć Achillesa.',
   },
   {
@@ -330,6 +388,15 @@ export const DEFAULT_SHOES: Shoe[] = [
     stabilityRating: 8,
     cushion: 'Pianka Energy Foam + Bieżnik All Terrain Contagrip',
     idealFor: 'Mieszane trasy: park miejski, szuter, leśne ścieżki i asfalt',
+    cushionLevel: 'Maksymalna Trail (Max Cushioning)',
+    dynamicsLevel: 'Umiarkowana z płynnym przetoczeniem Reverse Camber',
+    stabilityType: 'Stabilna w terenie (Głębokie trzymanie stopy SensiFit)',
+    trainingPurposes: ['terenowe', 'long_run', 'wolne_wybieganie'],
+    recommendedDistance: '15 km - Ultra (Trasy mieszane)',
+    plateType: 'Brak płytki (Elastyczny bieżnik All-Terrain)',
+    surfaceType: 'Teren / Trail, Las, Błoto, Szuter & Asfalt',
+    foamTechnology: 'Energy Foam (Połączenie EVA i Olefiny)',
+    dropDescription: 'Drop 6 mm w geometrii Reverse Camber — umożliwia zbieganie w trudnym terenie bez utraty stabilności kolan.',
     aiVerdict: 'Doskonały wybór na jesienno-zimowe treningi w zmiennym terenie.',
   },
 ];
@@ -531,7 +598,7 @@ export const DEFAULT_PLAN: TrainingDay[] = [
     targetPace: '-',
     hrZone: 'Strefa 1 (<120 bpm)',
     description: 'Dzień wolny. Mobilność bioder, rolowanie pasma biodrowo-piszczelowego i rozciąganie.',
-    completed: true,
+    completed: false,
   },
   {
     dayName: 'Wtorek',
@@ -542,7 +609,7 @@ export const DEFAULT_PLAN: TrainingDay[] = [
     targetPace: '5:45 min/km',
     hrZone: 'Strefa 2 (132-146 bpm)',
     description: 'Bieg tlenowy z adaptacją kadencji (Economy Run Z2). 4x80m żwawych przebieżek na koniec.',
-    completed: true,
+    completed: false,
   },
   {
     dayName: 'Środa',
@@ -749,6 +816,18 @@ class SoundEngine {
       osc.start();
       osc.stop(this.ctx.currentTime + 0.05);
     } catch {}
+  }
+
+  playSuccess() {
+    this.playPandaSound('cheer');
+  }
+
+  playError() {
+    this.playPandaSound('crunch');
+  }
+
+  playFanfare() {
+    this.playPandaSound('birthday');
   }
 
   playPandaSound(type: 'jump' | 'crunch' | 'cheer' | 'birthday') {

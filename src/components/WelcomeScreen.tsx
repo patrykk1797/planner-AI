@@ -1,5 +1,6 @@
 import React from 'react';
 import { UserAccount } from '../types.ts';
+import { AppIcon } from './AppIcon.tsx';
 
 interface WelcomeScreenProps {
   onOpenAuth: (mode: 'login' | 'register') => void;
@@ -23,15 +24,13 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       {/* Top Bar / Logo */}
       <header className="relative z-10 pt-4 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
-          <div className="w-10 h-10 rounded-2xl liquid-glass flex items-center justify-center text-2xl shadow-lg border border-white/15">
-            <span>🐼</span>
-          </div>
+          <AppIcon size="lg" />
           <div>
             <span className="text-[10px] font-black uppercase tracking-wider accent-text block">
               Fizjologia & Biomechanika 2027
             </span>
             <h1 className="text-lg font-black txt-main tracking-tight flex items-center gap-1.5">
-              <span>RunPanda</span>
+              <span>Treda</span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-[var(--accent-soft)] accent-text border border-[var(--accent-border)] font-bold">
                 PRO AI
               </span>

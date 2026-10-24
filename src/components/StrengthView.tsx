@@ -1,10 +1,24 @@
-import React, { useState, useEffect } from 'react';
-import { StrengthExercise, RunnerProfile, RunLog, WeatherData, PainZone } from '../types.ts';
+import React, { useState } from 'react';
+import {
+  Dumbbell,
+  Stethoscope,
+  HeartPulse,
+  Check,
+  CheckCircle2,
+  Circle,
+  AlertTriangle,
+  CloudSun,
+  ChevronUp,
+  ChevronDown,
+  Activity
+} from 'lucide-react';
+import { RunnerProfile, RunLog, WeatherData, PainZone } from '../types.ts';
 import { STRENGTH_EXERCISES, PAIN_ZONES_DATABASE, soundEngine } from '../utils/defaults.ts';
 import {
   calculateNicotineRecovery,
   calculateWeatherAdjustment,
 } from '../utils/runningMath.ts';
+import { HumanExerciseAnimation2D5 } from './HumanExerciseAnimation2D5.tsx';
 
 interface StrengthViewProps {
   profile: RunnerProfile;
@@ -23,83 +37,50 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
   onEarnBamboos,
   showToast,
 }) => {
-  // Main Sub-tabs: Siła vs Rozgrzewka ABC vs Ból Ciała (Fizjo) vs Zdrowie & Wykresy
-  const [activeSubTab, setActiveSubTab] = useState<'strength' | 'warmup' | 'physio' | 'health'>('strength');
+  // Main Sub-tabs: Siła (Biomechanika) vs Ból Ciała (Fizjo) vs Zdrowie
+  const [activeSubTab, setActiveSubTab] = useState<'strength' | 'physio' | 'health'>('strength');
 
   // Exercise filters & sets
   const [selectedPackage, setSelectedPackage] = useState<'all' | 'itbs' | 'achilles' | 'core'>('all');
   const [equipmentFilter, setEquipmentFilter] = useState<'all' | 'dom' | 'band' | 'gym'>('all');
   const [completedSets, setCompletedSets] = useState<Record<string, number>>({});
 
-  // 3-Minute Warmup Timer ABC state
-  const [warmupSecondsLeft, setWarmupSecondsLeft] = useState<number>(180);
-  const [isWarmupRunning, setIsWarmupRunning] = useState<boolean>(false);
-  const [currentWarmupIndex, setCurrentWarmupIndex] = useState<number>(0);
-
   // Physio & Pain Zone selection
-  const [selectedPainId, setSelectedPainId] = useState<string | null>('itbs');
+  const [selectedPainId, setSelectedPainId] = useState<string | null>('pz-knee-itbs');
 
   // Lifestyle collapsible toggle
   const [isLifestyleOpen, setIsLifestyleOpen] = useState<boolean>(true);
 
-  const WARMUP_STEPS = [
-    { title: 'Truchcik adaptacyjny & Krążenia ramion', duration: 45, tip: 'Łagodne podniesienie temperatury mięśni i rozgrzanie stawu barkowego.' },
-    { title: 'Wymachy nóg w płaszczyźnie strzałkowej i czołowej', duration: 35, tip: 'Dynamiczne rozciąganie taśmy kulszowo-goleniowej i przywodzicieli.' },
-    { title: 'Skip A (Wysokie unoszenie kolan z kątem 90°)', duration: 35, tip: 'Aktywacja zginaczy biodra i dynamiczne grzbietowe zgięcie stopy.' },
-    { title: 'Skip C (Uderzanie piętami o pośladki)', duration: 35, tip: 'Szybkie skracanie wahadła tylnego i rozciąganie czwórogłowego.' },
-    { title: '3x Przebieżka rytmiczna (Build-up 60m)', duration: 30, tip: 'Płynne przejście z kadencji 160 do 185 spm przed wejściem na trasę!' },
-  ];
-
-  useEffect(() => {
-    let interval: any = null;
-    if (isWarmupRunning && warmupSecondsLeft > 0) {
-      interval = setInterval(() => {
-        setWarmupSecondsLeft((prev) => {
-          if (prev <= 1) {
-            soundEngine.playPandaSound('cheer');
-            setIsWarmupRunning(false);
-            onEarnBamboos(25, 'Ukończono 3-minutową rozgrzewkę ABC');
-            showToast('Rozgrzewka ABC zakończona! Jesteś gotowy do biegu! +25 🎋');
-            return 0;
-          }
-          if (prev % 35 === 0) soundEngine.playClick(true);
-          return prev - 1;
-        });
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [isWarmupRunning, warmupSecondsLeft, onEarnBamboos, showToast]);
-
-  const handleStartWarmup = () => {
-    setIsWarmupRunning(!isWarmupRunning);
-    if (!isWarmupRunning) {
-      soundEngine.playClick(true);
-    }
-  };
-
-  const handleResetWarmup = () => {
-    setIsWarmupRunning(false);
-    setWarmupSecondsLeft(180);
-    setCurrentWarmupIndex(0);
-  };
-
   const handleLogSet = (exerciseId: string, exName: string) => {
     const nextCount = (completedSets[exerciseId] || 0) + 1;
     setCompletedSets((prev) => ({ ...prev, [exerciseId]: nextCount }));
-    soundEngine.playPandaSound('crunch');
-    onEarnBamboos(25, `Seria: ${exName}`);
-    showToast(`Odhaczono serię (${nextCount}/3): ${exName}! +25 🎋`);
+    soundEngine.playClick(true);
+    showToast(`Odhaczono serię (${nextCount}/3): ${exName}!`);
   };
 
   const handleSelectPain = (pain: PainZone) => {
-    setSelectedPainId(pain.id);
-    const updated = profile.activePainZones?.includes(pain.id)
-      ? profile.activePainZones.filter((id) => id !== pain.id)
-      : [...(profile.activePainZones || []), pain.id];
+    const isCurrentlyActive = selectedPainId === pain.id || profile.activePainZones?.includes(pain.id);
 
-    onUpdateProfile({ activePainZones: updated });
+    if (isCurrentlyActive) {
+      setSelectedPainId(null);
+      const updated = (profile.activePainZones || []).filter((id) => id !== pain.id);
+      onUpdateProfile({ activePainZones: updated });
+      soundEngine.playClick(true);
+      showToast(`Odkliknięto ból: ${pain.label} - wyczyszczono protokół! 👍`);
+    } else {
+      setSelectedPainId(pain.id);
+      const updated = [...(profile.activePainZones || []).filter((id) => id !== pain.id), pain.id];
+      onUpdateProfile({ activePainZones: updated });
+      soundEngine.playClick(true);
+      showToast(`Aktywowano protokół rehabilitacyjny dla: ${pain.label}`);
+    }
+  };
+
+  const handleClearAllPain = () => {
+    setSelectedPainId(null);
+    onUpdateProfile({ activePainZones: [] });
     soundEngine.playClick(true);
-    showToast(`Aktywowano protokół rehabilitacyjny dla: ${pain.label}`);
+    showToast('Wyczyszczono wszystkie obszary bólowe! Wracasz do pełnego planu! 🟢');
   };
 
   const nicotineStats = calculateNicotineRecovery(profile.smokeFreeDays || 0);
@@ -115,55 +96,50 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
     <div className="space-y-4 px-4 pb-24 animate-ios">
       {/* Top Header Card */}
       <div className="liquid-glass p-4 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <div>
-            <span className="text-[10px] font-black uppercase tracking-wider accent-text">
-              Centrum Biomechaniki & Zdrowia
+            <span className="text-[10px] font-black uppercase tracking-wider accent-text flex items-center gap-1">
+              <Activity className="w-3 h-3" />
+              <span>Centrum Biomechaniki & Zdrowia</span>
             </span>
-            <h2 className="text-base font-bold txt-main">Siła, ABC, Ból Ciała & Zdrowie</h2>
+            <h2 className="text-base font-bold txt-main">Siła, Ból Ciała & Zdrowie</h2>
           </div>
-          <span className="text-xs font-black px-2.5 py-1 rounded-full accent-badge">
-            +25 🎋 / seria
+          <span className="text-[10px] font-black px-2.5 py-1 rounded-full accent-badge shrink-0">
+            Wzorzec Biomechaniczny
           </span>
         </div>
 
-        {/* 4 Clean Sub-tabs */}
-        <div className="grid grid-cols-4 gap-1 p-1 liquid-pill text-center text-xs">
+        {/* 3 Clean Sub-tabs with Vector Icons */}
+        <div className="grid grid-cols-3 gap-1.5 p-1 liquid-pill text-center text-xs">
           <button
             type="button"
             onClick={() => setActiveSubTab('strength')}
-            className={`py-2 rounded-xl font-bold transition-all ${
-              activeSubTab === 'strength' ? 'liquid-active' : 'txt-sub'
+            className={`py-2 px-2 rounded-xl font-bold transition-all flex items-center justify-center gap-1.5 ${
+              activeSubTab === 'strength' ? 'liquid-active font-black' : 'txt-sub hover:text-white'
             }`}
           >
-            🏋️ Siła
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveSubTab('warmup')}
-            className={`py-2 rounded-xl font-bold transition-all ${
-              activeSubTab === 'warmup' ? 'liquid-active' : 'txt-sub'
-            }`}
-          >
-            ⏱️ ABC
+            <Dumbbell className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Siła</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveSubTab('physio')}
-            className={`py-2 rounded-xl font-bold transition-all ${
-              activeSubTab === 'physio' ? 'liquid-active' : 'txt-sub'
+            className={`py-2 px-2 rounded-xl font-bold transition-all flex items-center justify-center gap-1.5 ${
+              activeSubTab === 'physio' ? 'liquid-active font-black' : 'txt-sub hover:text-white'
             }`}
           >
-            🩹 Ból Ciała
+            <Stethoscope className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Ból Ciała</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveSubTab('health')}
-            className={`py-2 rounded-xl font-bold transition-all ${
-              activeSubTab === 'health' ? 'liquid-active' : 'txt-sub'
+            className={`py-2 px-2 rounded-xl font-bold transition-all flex items-center justify-center gap-1.5 ${
+              activeSubTab === 'health' ? 'liquid-active font-black' : 'txt-sub hover:text-white'
             }`}
           >
-            🩺 Zdrowie
+            <HeartPulse className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Zdrowie</span>
           </button>
         </div>
       </div>
@@ -194,11 +170,11 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
           </div>
 
           {/* Exercises list */}
-          <div className="space-y-3">
+          <div className="space-y-4">
             {filteredExercises.map((ex) => {
               const currentSets = completedSets[ex.id] || 0;
               return (
-                <div key={ex.id} className="liquid-glass p-4 space-y-2.5">
+                <div key={ex.id} className="liquid-glass p-4 space-y-3 border border-white/10 hover:border-[var(--accent)]/40 transition-all">
                   <div className="flex items-start justify-between">
                     <div>
                       <h3 className="text-sm font-black txt-main">{ex.name}</h3>
@@ -218,11 +194,14 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
                     </button>
                   </div>
 
+                  {/* 2.5D Vector Human Motion Technique Model */}
+                  <HumanExerciseAnimation2D5 exerciseId={ex.id} exerciseName={ex.name} />
+
                   <p className="text-[11px] txt-sub leading-snug">{ex.instructions.join(' ')}</p>
 
                   <div className="liquid-pill p-2 text-[10px] txt-muted flex items-center justify-between">
-                    <span>Cel: <strong className="txt-main">{ex.targetMuscle}</strong></span>
-                    <span className="accent-text font-bold">+25 🎋 XP</span>
+                    <span>Cel mięśniowy: <strong className="txt-main">{ex.targetMuscle}</strong></span>
+                    <span className="text-emerald-400 font-bold">Wzorzec Techniki ✓</span>
                   </div>
                 </div>
               );
@@ -231,50 +210,9 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
         </div>
       )}
 
-      {/* 2. ROZGRZEWKA ABC & TIMER 3 MIN */}
-      {activeSubTab === 'warmup' && (
-        <div className="space-y-3 animate-ios">
-          <div className="liquid-glass p-5 text-center space-y-4">
-            <span className="text-[10px] font-black uppercase tracking-wider accent-text">
-              3-Minutowy Inteligentny Timer Rozgrzewki Przed Biegiem
-            </span>
-            <div className="text-4xl font-black txt-main ios-num">
-              {Math.floor(warmupSecondsLeft / 60)}:
-              {(warmupSecondsLeft % 60).toString().padStart(2, '0')}
-            </div>
 
-            {/* Current Step description */}
-            <div className="liquid-pill p-3 space-y-1">
-              <span className="text-xs font-bold txt-main block">
-                {WARMUP_STEPS[Math.min(currentWarmupIndex, WARMUP_STEPS.length - 1)].title}
-              </span>
-              <p className="text-[11px] txt-sub">
-                {WARMUP_STEPS[Math.min(currentWarmupIndex, WARMUP_STEPS.length - 1)].tip}
-              </p>
-            </div>
 
-            <div className="flex items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={handleStartWarmup}
-                className="liquid-active px-6 py-2.5 text-xs font-black rounded-full shadow-lg hover:scale-105 active:scale-95"
-              >
-                {isWarmupRunning ? '⏸️ Pauza' : '▶️ Uruchom Timer ABC'}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleResetWarmup}
-                className="liquid-pill px-4 py-2.5 text-xs font-bold txt-sub hover:text-white rounded-full"
-              >
-                Resetuj
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 3. BÓL CIAŁA & WIRTUALNY FIZJOTERAPEUTA (Przeniesione z Pandy) */}
+      {/* 3. BÓL CIAŁA & WIRTUALNY FIZJOTERAPEUTA */}
       {activeSubTab === 'physio' && (
         <div className="space-y-3 animate-ios">
           <div className="liquid-glass p-4 space-y-2">
@@ -285,7 +223,9 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
                 </span>
                 <h3 className="text-base font-bold txt-main">Interaktywna Mapa Bólu Ciała</h3>
               </div>
-              <span className="text-xl">🩺</span>
+              <div className="w-9 h-9 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center shrink-0">
+                <Stethoscope className="w-4 h-4 text-rose-400" />
+              </div>
             </div>
             <p className="text-[11px] txt-sub leading-snug">
               Dotknij obszar ciała, w którym odczuwasz przeciążenie. AI natychmiast wygeneruje protokół naprawczy oraz dostosuje Twój plan treningowy!
@@ -293,8 +233,20 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
           </div>
 
           {/* Clickable anatomical pain buttons */}
-          <div className="liquid-glass p-4 space-y-2">
-            <span className="text-xs font-bold txt-main block">Wybierz bolesny obszar:</span>
+          <div className="liquid-glass p-4 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold txt-main">Wybierz bolesny obszar:</span>
+              {(selectedPainId || (profile.activePainZones && profile.activePainZones.length > 0)) && (
+                <button
+                  type="button"
+                  onClick={handleClearAllPain}
+                  className="px-2.5 py-1 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold hover:bg-emerald-500/30 transition-all flex items-center gap-1 shadow-sm active:scale-95"
+                >
+                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                  <span>Odkliknij ból (Brak bólu)</span>
+                </button>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-2">
               {PAIN_ZONES_DATABASE.map((pz) => {
                 const isSelected = selectedPainId === pz.id || profile.activePainZones?.includes(pz.id);
@@ -309,9 +261,13 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
                         : 'liquid-pill txt-main hover:border-white/20'
                     }`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-xs">{pz.label}</span>
-                      <span>{isSelected ? '🔴' : '⚪'}</span>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="font-bold text-xs truncate">{pz.label}</span>
+                      {isSelected ? (
+                        <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                      ) : (
+                        <Circle className="w-3.5 h-3.5 text-white/30 shrink-0" />
+                      )}
                     </div>
                     <span className="text-[9px] txt-muted block mt-1">{pz.severity}</span>
                   </button>
@@ -352,7 +308,7 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
         </div>
       )}
 
-      {/* 4. ZDROWIE, REGENERACJA & WYKRESY (Przeniesione z Pandy) */}
+      {/* 4. ZDROWIE, REGENERACJA & WYKRESY */}
       {activeSubTab === 'health' && (
         <div className="space-y-3 animate-ios">
           {/* Weather & Temp Pace Correction */}
@@ -364,7 +320,9 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
                 </span>
                 <h3 className="text-sm font-bold txt-main">Pogodowy Korektor Tempa & Ubiór</h3>
               </div>
-              <span className="text-xl">🌤️</span>
+              <div className="w-9 h-9 rounded-2xl bg-sky-500/20 border border-sky-500/40 flex items-center justify-center shrink-0">
+                <CloudSun className="w-4 h-4 text-sky-400" />
+              </div>
             </div>
 
             <div className="liquid-pill p-3 space-y-1 text-xs">
@@ -377,8 +335,9 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
                 <span className="txt-main text-right">{weatherAdj.clothingAdvice}</span>
               </div>
               {weatherAdj.weatherWarning && (
-                <div className="text-[10px] text-amber-300 pt-1">
-                  ⚠️ {weatherAdj.weatherWarning}
+                <div className="text-[10px] text-amber-300 pt-1 flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                  <span>{weatherAdj.weatherWarning}</span>
                 </div>
               )}
             </div>
@@ -396,7 +355,10 @@ export const StrengthView: React.FC<StrengthViewProps> = ({
                 </span>
                 <h3 className="text-sm font-bold txt-main">Leki Regulujące Tętno & Regeneracja</h3>
               </div>
-              <span className="text-xs font-bold txt-muted">{isLifestyleOpen ? '▲ Zwiń' : '▼ Rozwiń'}</span>
+              <span className="text-xs font-bold txt-muted flex items-center gap-1">
+                {isLifestyleOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                <span>{isLifestyleOpen ? 'Zwiń' : 'Rozwiń'}</span>
+              </span>
             </div>
 
             {isLifestyleOpen && (

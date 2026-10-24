@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { UserAccount, RunnerProfile } from '../types.ts';
 import { auth, googleAuthProvider } from '../lib/firebase.ts';
 import { signInWithPopup, FacebookAuthProvider, OAuthProvider } from 'firebase/auth';
+import { AppIcon } from './AppIcon.tsx';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll.ts';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -25,8 +27,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [tab, setTab] = useState<'login' | 'register'>(initialTab);
   
   // Login form
-  const [loginEmail, setLoginEmail] = useState<string>('patrykk1797@gmail.com');
-  const [loginPassword, setLoginPassword] = useState<string>('••••••••');
+  const [loginEmail, setLoginEmail] = useState<string>('');
+  const [loginPassword, setLoginPassword] = useState<string>('');
   
   // Register form
   const [regName, setRegName] = useState<string>('');
@@ -44,39 +46,148 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     errorReason?: string;
   } | null>(null);
 
-  if (!isOpen) return null;
+  // Account linking state
+  const [accountLinkPrompt, setAccountLinkPrompt] = useState<{
+    existingAccount: UserAccount;
+    newProvider: 'email' | 'google' | 'facebook' | 'apple';
+    newAccountData: UserAccount;
+  } | null>(null);
 
-  const handleClassicLogin = (e: React.FormEvent) => {
+  const processLoginOrLink = async (
+    email: string,
+    provider: 'email' | 'google' | 'facebook' | 'apple',
+    newAcc: UserAccount,
+    isRegisterTab: boolean = false
+  ) => {
+    const cleanEmail = email.trim().toLowerCase();
+
+    // 1. Check local accounts on this device
+    let existing = existingAccounts.find(
+      (a) => a.email.toLowerCase() === cleanEmail
+    );
+
+    // 2. If not found locally (e.g. logging in on another device), check Cloud SQL database
+    if (!existing) {
+      try {
+        const res = await fetch(`/api/db/user-by-email?email=${encodeURIComponent(cleanEmail)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.found && data.user) {
+            const u = data.user;
+            const full = data.userData || {};
+            const fullAcc = full.account || {};
+            existing = {
+              id: u.uid,
+              name: u.name || fullAcc.name || cleanEmail.split('@')[0],
+              email: u.email,
+              avatar: u.avatar || fullAcc.avatar,
+              provider: fullAcc.provider || provider,
+              linkedProviders: fullAcc.linkedProviders || [fullAcc.provider || provider],
+              createdAt: fullAcc.createdAt || new Date().toISOString().slice(0, 10),
+              onboardingCompleted: Boolean(fullAcc.onboardingCompleted ?? true),
+              isPro: Boolean(fullAcc.isPro ?? true),
+              subscriptionTier: fullAcc.subscriptionTier || 'PRO',
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('Could not query user-by-email:', err);
+      }
+    }
+
+    // 3. If account already exists with this email
+    if (existing) {
+      const isAlreadyLinked =
+        existing.provider === provider ||
+        (existing.linkedProviders || []).includes(provider);
+
+      if (isAlreadyLinked) {
+        // Same provider or already linked! Log into existing account directly, preserving all data
+        onLoginSuccess(existing, false);
+        showToast(`Witaj ponownie, ${existing.name}! Zalogowano do Twojego konta.`);
+        onClose();
+        return;
+      }
+
+      // Existing account found under a DIFFERENT provider -> ask whether to link accounts
+      setAccountLinkPrompt({
+        existingAccount: existing,
+        newProvider: provider,
+        newAccountData: newAcc,
+      });
+      return;
+    }
+
+    // 4. No existing account found anywhere -> create/log in
+    onLoginSuccess(newAcc, isRegisterTab);
+    showToast(
+      isRegisterTab
+        ? `Konto utworzone pomyślnie! Witaj w Treda 🏃`
+        : `Zalogowano pomyślnie jako ${newAcc.name}!`
+    );
+    onClose();
+  };
+
+  const handleConfirmLink = () => {
+    if (!accountLinkPrompt) return;
+    const { existingAccount, newProvider } = accountLinkPrompt;
+    const linked = Array.from(
+      new Set([
+        ...(existingAccount.linkedProviders || []),
+        existingAccount.provider,
+        newProvider,
+      ])
+    );
+    const updated: UserAccount = {
+      ...existingAccount,
+      linkedProviders: linked,
+    };
+    onLoginSuccess(updated, false);
+
+    // Sync linkedProviders to Cloud SQL database so both providers work on all devices
+    fetch('/api/db/user-data', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': updated.id,
+      },
+      body: JSON.stringify({ account: updated }),
+    }).catch(() => {});
+
+    showToast(
+      `Konta powiązane! Możesz teraz logować się przez ${newProvider.toUpperCase()} lub dotychczasową metodę (${existingAccount.provider.toUpperCase()}) do tego samego konta.`
+    );
+    setAccountLinkPrompt(null);
+    onClose();
+  };
+
+  const handleDeclineLink = () => {
+    if (!accountLinkPrompt) return;
+    const { newAccountData } = accountLinkPrompt;
+    onLoginSuccess(newAccountData, false);
+    showToast(`Zalogowano jako ${newAccountData.name} (osobne konto)!`);
+    setAccountLinkPrompt(null);
+    onClose();
+  };
+
+  const handleClassicLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!loginEmail.trim() || !loginPassword.trim()) {
       showToast('Wprowadź e-mail i hasło');
       return;
     }
 
-    // Find existing account or log in
-    const existing = existingAccounts.find(
-      (a) => a.email.toLowerCase() === loginEmail.trim().toLowerCase()
-    );
+    const newAcc: UserAccount = {
+      id: `user-email-${Date.now()}`,
+      name: loginEmail.split('@')[0],
+      email: loginEmail.trim(),
+      provider: 'email',
+      avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${loginEmail}`,
+      createdAt: new Date().toISOString().split('T')[0],
+      onboardingCompleted: true,
+    };
 
-    if (existing) {
-      onLoginSuccess(existing, false);
-      showToast(`Zalogowano jako ${existing.name}! Witaj ponownie 👋`);
-      onClose();
-    } else {
-      // Create new session account
-      const newAcc: UserAccount = {
-        id: `user-email-${Date.now()}`,
-        name: loginEmail.split('@')[0],
-        email: loginEmail.trim(),
-        provider: 'email',
-        avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${loginEmail}`,
-        createdAt: new Date().toISOString().split('T')[0],
-        onboardingCompleted: true,
-      };
-      onLoginSuccess(newAcc, false);
-      showToast(`Zalogowano pomyślnie jako ${newAcc.name}!`);
-      onClose();
-    }
+    await processLoginOrLink(loginEmail, 'email', newAcc, false);
   };
 
   const handleClassicRegister = (e: React.FormEvent) => {
@@ -139,9 +250,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           onboardingCompleted: tab === 'register' ? false : true,
         };
 
-        onLoginSuccess(account, tab === 'register');
-        showToast(`Zalogowano przez Google jako ${account.name}!`);
-        onClose();
+        await processLoginOrLink(account.email, 'google', account, tab === 'register');
         return;
       } catch (err: any) {
         console.warn('Google popup auth error:', err);
@@ -149,9 +258,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       setSocialPrompt({
         provider: 'google',
-        name: 'Patryk Kaczmarek',
-        email: 'patrykk1797@gmail.com',
-        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+        name: 'Biegacz Google',
+        email: '',
+        avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=google-runner',
         isFirebaseConfigMissing: false,
       });
     } else if (provider === 'apple') {
@@ -181,17 +290,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           onboardingCompleted: tab === 'register' ? false : true,
         };
 
-        onLoginSuccess(account, tab === 'register');
-        showToast(`Zalogowano przez Apple ID jako ${account.name}!`);
-        onClose();
+        await processLoginOrLink(account.email, 'apple', account, tab === 'register');
         return;
       } catch (err: any) {
         console.warn('Apple OAuth in Firebase requires Service ID in Firebase Console:', err);
         setSocialPrompt({
           provider: 'apple',
-          name: 'Patryk (Apple ID)',
-          email: 'patryk.apple@icloud.com',
-          avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
+          name: 'Biegacz Apple',
+          email: '',
+          avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=apple-runner',
           isFirebaseConfigMissing: true,
           errorReason: 'Wymaga aktywacji Sign in with Apple w Firebase Console z podaniem Service ID i klucza .p8 z konta Apple Developer ($99/rok).',
         });
@@ -224,17 +331,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           onboardingCompleted: tab === 'register' ? false : true,
         };
 
-        onLoginSuccess(account, tab === 'register');
-        showToast(`Zalogowano przez Facebook jako ${account.name}!`);
-        onClose();
+        await processLoginOrLink(account.email, 'facebook', account, tab === 'register');
         return;
       } catch (err: any) {
         console.warn('Facebook OAuth requires Meta App ID in Firebase Console:', err);
         setSocialPrompt({
           provider: 'facebook',
-          name: 'Patryk Biegacz',
-          email: 'patryk.fb@meta.com',
-          avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150&auto=format&fit=crop&q=80',
+          name: 'Biegacz Facebook',
+          email: '',
+          avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=facebook-runner',
           isFirebaseConfigMissing: true,
           errorReason: 'Wymaga wpisania App ID i App Secret z developers.facebook.com w Firebase Console -> Authentication -> Sign-in method -> Facebook.',
         });
@@ -242,58 +347,39 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const confirmSocialAuth = () => {
+  const confirmSocialAuth = async () => {
     if (!socialPrompt) return;
 
-    const existing = existingAccounts.find(
-      (a) => a.email.toLowerCase() === socialPrompt.email.toLowerCase()
-    );
-
-    if (existing) {
-      onLoginSuccess(existing, false);
-      showToast(`Zalogowano przez ${socialPrompt.provider.toUpperCase()} jako ${existing.name}!`);
-    } else {
-      const isNew = tab === 'register';
-      const newAcc: UserAccount = {
-        id: `user-${socialPrompt.provider}-${Date.now()}`,
-        name: socialPrompt.name.trim() || 'Biegacz',
-        email: socialPrompt.email.trim(),
-        provider: socialPrompt.provider,
-        avatar: socialPrompt.avatar,
-        createdAt: new Date().toISOString().split('T')[0],
-        onboardingCompleted: !isNew,
-      };
-
-      // Sync with Cloud SQL in the background
-      fetch('/api/db/sync-user', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-id': newAcc.id,
-          'x-user-email': newAcc.email,
-          'x-user-name': newAcc.name,
-        },
-      }).catch(() => {});
-
-      onLoginSuccess(newAcc, isNew);
-      showToast(isNew ? `Konto ${newAcc.name} utworzone z wyzerowanymi danymi! 🚀` : `Zalogowano jako ${newAcc.name}!`);
-    }
+    const isNew = tab === 'register';
+    const newAcc: UserAccount = {
+      id: `user-${socialPrompt.provider}-${Date.now()}`,
+      name: socialPrompt.name.trim() || 'Biegacz',
+      email: socialPrompt.email.trim(),
+      provider: socialPrompt.provider,
+      avatar: socialPrompt.avatar,
+      createdAt: new Date().toISOString().split('T')[0],
+      onboardingCompleted: !isNew,
+    };
 
     setSocialPrompt(null);
-    onClose();
+    await processLoginOrLink(socialPrompt.email, socialPrompt.provider, newAcc, isNew);
   };
+
+  useLockBodyScroll(isOpen);
+
+  if (!isOpen) return null;
 
   return (
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 bg-black/85 backdrop-blur-xl z-50 flex items-center justify-center p-4 animate-ios"
+      className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-xl flex items-center justify-center p-3 sm:p-4 overscroll-contain h-[100dvh] w-screen overflow-y-auto animate-ios"
     >
-      <div className="liquid-glass w-full max-w-md p-6 space-y-5 animate-ios-modal max-h-[92vh] overflow-y-auto no-scrollbar relative border border-white/10">
+      <div className="liquid-glass w-full max-w-md p-6 space-y-5 animate-ios-modal max-h-[90dvh] overflow-y-auto no-scrollbar relative border border-white/10 my-auto">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <span className="text-2xl">🐼</span>
+            <AppIcon size="md" />
             <div>
               <span className="text-[10px] font-black uppercase tracking-wider accent-text">
                 RunPanda Pro 2027
@@ -621,6 +707,42 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   className="py-2.5 rounded-xl accent-btn-gradient text-xs font-black uppercase tracking-wider shadow-lg"
                 >
                   Zezwól i wejdź
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {accountLinkPrompt && (
+          <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/85 backdrop-blur-2xl z-50 flex items-center justify-center p-4 animate-ios">
+            <div className="liquid-glass w-full max-w-md p-6 space-y-4 border border-white/15 rounded-3xl shadow-2xl">
+              <div className="flex items-center gap-2.5">
+                <span className="text-2xl">🔗</span>
+                <div>
+                  <h3 className="text-base font-black txt-main">Powiązanie Istniejącego Konta</h3>
+                  <span className="text-[10px] accent-text font-bold">Wykryto ten sam adres e-mail</span>
+                </div>
+              </div>
+
+              <p className="text-xs txt-sub leading-relaxed">
+                Adres e-mail <strong className="text-white">{accountLinkPrompt.existingAccount.email}</strong> jest już zarejestrowany przy użyciu metody <strong className="text-white uppercase">{accountLinkPrompt.existingAccount.provider}</strong>.
+                <br /><br />
+                Czy chcesz powiązać konta, aby w przyszłości móc logować się zarówno przez <strong className="text-white uppercase">{accountLinkPrompt.existingAccount.provider}</strong>, jak i nową metodę (<strong className="text-white uppercase">{accountLinkPrompt.newProvider}</strong>)?
+              </p>
+
+              <div className="grid grid-cols-2 gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleDeclineLink}
+                  className="py-2.5 px-3 rounded-xl liquid-pill font-bold text-xs txt-sub hover:text-white"
+                >
+                  Nie, osobne konto
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmLink}
+                  className="py-2.5 px-3 rounded-xl accent-btn-gradient text-slate-950 font-black text-xs shadow-md hover:brightness-110"
+                >
+                  Tak, powiąż konta
                 </button>
               </div>
             </div>

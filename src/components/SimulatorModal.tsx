@@ -1,7 +1,18 @@
 import React, { useState, useEffect } from 'react';
+import {
+  BarChart3,
+  Rocket,
+  Stethoscope,
+  AlertTriangle,
+  Volume2,
+  Music,
+  Check,
+  X
+} from 'lucide-react';
 import { RunnerProfile, Shoe } from '../types.ts';
 import { runWhatIfSimulator, time5kToSeconds, SimulatorOutputs } from '../utils/runningMath.ts';
 import { soundEngine } from '../utils/defaults.ts';
+import { useLockBodyScroll } from '../utils/useLockBodyScroll.ts';
 
 interface SimulatorModalProps {
   isOpen: boolean;
@@ -18,14 +29,19 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
   shoes,
   onApplyToProfile,
 }) => {
+  // Defensive normalization for safe execution
+  const safeShoes = Array.isArray(shoes) && shoes.length > 0 ? shoes : [];
+  const safeProfileWeight = typeof profile?.weight === 'number' && !isNaN(profile.weight) && profile.weight > 0 ? profile.weight : 74.5;
+  const safeProfile5k = profile?.time5k || '25:00';
+
   // Simulator sliders state
-  const [weight, setWeight] = useState<number>(profile.weight);
+  const [weight, setWeight] = useState<number>(safeProfileWeight);
   const [cadence, setCadence] = useState<number>(172);
   const [z2Percent, setZ2Percent] = useState<number>(75);
   const [strengthSessions, setStrengthSessions] = useState<number>(2);
   const [sleepScore, setSleepScore] = useState<number>(8);
   const [raceTemp, setRaceTemp] = useState<number>(14);
-  const [selectedShoeId, setSelectedShoeId] = useState<string>(profile.selectedShoeId || shoes[0]?.id || 'shoe-1');
+  const [selectedShoeId, setSelectedShoeId] = useState<string>(profile?.selectedShoeId || safeShoes[0]?.id || 'shoe-1');
   
   // Metronome state
   const [isMetronomeActive, setIsMetronomeActive] = useState<boolean>(false);
@@ -34,22 +50,49 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
   // Mode selection: "Moja Forma" vs "Potencjał na Wybrany Bieg"
   const [simMode, setSimMode] = useState<'current' | 'optimal'>('optimal');
 
-  const selectedShoe = shoes.find((s) => s.id === selectedShoeId) || shoes[0];
-  const isCarbon = selectedShoe?.cushion.toLowerCase().includes('karbon') || selectedShoe?.name.toLowerCase().includes('vaporfly');
+  const selectedShoe = safeShoes.find((s) => s.id === selectedShoeId) || safeShoes[0] || null;
+  const shoeCushion = (selectedShoe?.cushion || '').toLowerCase();
+  const shoeName = (selectedShoe?.name || '').toLowerCase();
+  const isCarbon = Boolean(
+    shoeCushion.includes('karbon') ||
+    shoeCushion.includes('carbon') ||
+    shoeName.includes('vaporfly') ||
+    shoeName.includes('alphafly') ||
+    shoeName.includes('adios pro') ||
+    shoeName.includes('metaspeed')
+  );
 
   const outputs: SimulatorOutputs = runWhatIfSimulator({
-    baseWeightKg: profile.weight,
-    simWeightKg: weight,
-    base5kSeconds: time5kToSeconds(profile.time5k),
-    cadenceSpm: cadence,
-    aerobicZ2Pct: z2Percent,
-    strengthWeekly: strengthSessions,
-    sleepScore: sleepScore,
-    raceTempC: raceTemp,
+    baseWeightKg: safeProfileWeight,
+    simWeightKg: weight || safeProfileWeight,
+    base5kSeconds: time5kToSeconds(safeProfile5k),
+    cadenceSpm: cadence || 172,
+    aerobicZ2Pct: z2Percent ?? 75,
+    strengthWeekly: strengthSessions ?? 2,
+    sleepScore: sleepScore ?? 8,
+    raceTempC: raceTemp ?? 14,
     shoeWeightG: selectedShoe?.weightG || 240,
     shoeEnergyReturn: selectedShoe?.energyReturn || 8,
     isCarbonShoe: isCarbon,
   });
+
+  // Sync simulator sliders when modal opens or profile updates
+  useEffect(() => {
+    if (isOpen) {
+      setWeight(profile.weight);
+      if (profile.selectedShoeId) {
+        setSelectedShoeId(profile.selectedShoeId);
+      }
+    }
+  }, [isOpen, profile.weight, profile.selectedShoeId]);
+
+  // Keep metronome BPM synchronized when cadence slider changes while active
+  useEffect(() => {
+    if (isMetronomeActive) {
+      soundEngine.stopMetronome();
+      soundEngine.startMetronome(cadence, (b) => setBeatNum(b));
+    }
+  }, [cadence, isMetronomeActive]);
 
   // Metronome toggle
   const toggleMetronome = () => {
@@ -87,20 +130,22 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
     }
   };
 
+  useLockBodyScroll(isOpen);
+
   if (!isOpen) return null;
 
   return (
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 bg-black/85 backdrop-blur-xl z-50 flex items-center justify-center p-3 animate-ios overflow-y-auto"
+      className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-xl flex items-center justify-center p-3 sm:p-4 overscroll-contain h-[100dvh] w-screen overflow-y-auto animate-ios"
     >
-      <div className="liquid-glass w-full max-w-md p-5 space-y-4 animate-ios-modal max-h-[92vh] overflow-y-auto no-scrollbar my-auto">
+      <div className="liquid-glass w-full max-w-md p-5 space-y-4 animate-ios-modal max-h-[90dvh] overflow-y-auto no-scrollbar my-auto">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
             <span className="text-[10px] font-black uppercase tracking-wider accent-text">
-              Moduł 1 • Predyktor Fizjologiczny
+              PREDYKTOR & KALKULATOR FIZJOLOGICZNY
             </span>
             <h2 className="text-base font-black txt-main">Symulator Biegowy „Co Jeśli?”</h2>
           </div>
@@ -114,7 +159,7 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
             aria-label="Zamknij symulator"
             className="w-8 h-8 rounded-full liquid-pill flex items-center justify-center txt-sub text-xs font-bold hover:text-white"
           >
-            ✕
+            <X className="w-4 h-4" />
           </button>
         </div>
 
@@ -123,20 +168,22 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
           <button
             type="button"
             onClick={() => handleApplyPresetMode('current')}
-            className={`py-2 text-xs font-bold rounded-xl transition-all ${
-              simMode === 'current' ? 'liquid-active' : 'txt-sub'
+            className={`py-2 px-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+              simMode === 'current' ? 'liquid-active font-black' : 'txt-sub hover:text-white'
             }`}
           >
-            📊 Moja Forma (Stan Obecny)
+            <BarChart3 className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Moja Forma (Obecna)</span>
           </button>
           <button
             type="button"
             onClick={() => handleApplyPresetMode('optimal')}
-            className={`py-2 text-xs font-bold rounded-xl transition-all ${
-              simMode === 'optimal' ? 'liquid-active' : 'txt-sub'
+            className={`py-2 px-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+              simMode === 'optimal' ? 'liquid-active font-black' : 'txt-sub hover:text-white'
             }`}
           >
-            🚀 Potencjał na Cel Startowy
+            <Rocket className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Potencjał Startowy</span>
           </button>
         </div>
 
@@ -185,7 +232,7 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
         <div className="liquid-pill p-3 space-y-1.5 border border-white/10">
           <div className="flex items-center justify-between text-xs">
             <span className="font-bold txt-main flex items-center gap-1.5">
-              <span>🩺</span>
+              <Stethoscope className="w-3.5 h-3.5 text-rose-400 shrink-0" />
               <span>Wskaźnik Ryzyka Kontuzji (ITBS / Kolano / Achilles)</span>
             </span>
             <span
@@ -218,7 +265,7 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
             <div className="text-[10px] text-rose-300 space-y-0.5 pt-1">
               {outputs.injuryFactors.map((f, i) => (
                 <div key={i} className="flex items-start gap-1">
-                  <span>⚠️</span>
+                  <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0 mt-0.5" />
                   <span>{f}</span>
                 </div>
               ))}
@@ -232,7 +279,7 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
           <div className="liquid-pill p-3 space-y-1">
             <div className="flex justify-between">
               <label htmlFor="sim-weight" className="font-bold txt-main">Masa ciała zawodnika</label>
-              <span className="accent-text font-black text-sm ios-num">{weight.toFixed(1)} kg</span>
+              <span className="accent-text font-black text-sm ios-num">{(Number(weight) || 70).toFixed(1)} kg</span>
             </div>
             <input
               id="sim-weight"
@@ -263,13 +310,23 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
                   type="button"
                   onClick={toggleMetronome}
                   aria-label="Włącz metronom WebAudio"
-                  className={`px-2.5 py-1 rounded-full text-[10px] font-black transition-all ${
+                  className={`px-2.5 py-1 rounded-full text-[10px] font-black transition-all flex items-center gap-1 ${
                     isMetronomeActive
                       ? 'bg-rose-500 text-white animate-pulse'
                       : 'liquid-active'
                   }`}
                 >
-                  {isMetronomeActive ? `🔊 Takt ${beatNum}/4` : '🎵 Metronom'}
+                  {isMetronomeActive ? (
+                    <>
+                      <Volume2 className="w-3 h-3" />
+                      <span>Takt {beatNum}/4</span>
+                    </>
+                  ) : (
+                    <>
+                      <Music className="w-3 h-3" />
+                      <span>Metronom</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
@@ -354,9 +411,9 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
                 onChange={(e) => setSelectedShoeId(e.target.value)}
                 className="w-full bg-transparent txt-main font-bold outline-none text-[11px]"
               >
-                {shoes.map((s) => (
+                {safeShoes.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name} ({s.weightG}g)
+                    {s.name} ({s.weightG || 240}g)
                   </option>
                 ))}
               </select>
@@ -406,17 +463,26 @@ export const SimulatorModal: React.FC<SimulatorModalProps> = ({
           <button
             type="button"
             onClick={() => {
+              soundEngine.stopMetronome();
+              setIsMetronomeActive(false);
               if (onApplyToProfile) {
+                const newVo2 = Math.max(
+                  25,
+                  Math.round((profile.vo2max || 42) + outputs.vo2RelativeGain)
+                );
                 onApplyToProfile({
                   targetWeight: weight,
                   selectedShoeId,
+                  time5k: outputs.predicted5kTime,
+                  vo2max: newVo2,
                 });
               }
               onClose();
             }}
-            className="flex-1 py-3 rounded-full accent-bg text-black font-black text-xs hover:brightness-110 shadow-lg"
+            className="flex-1 py-3 rounded-xl accent-bg text-black font-black text-xs hover:brightness-110 shadow-lg flex items-center justify-center gap-1.5 active:scale-95 transition-all"
           >
-            ✓ Zastosuj Parametry do Planu
+            <Check className="w-4 h-4 stroke-[3]" />
+            <span>Zastosuj Parametry do Planu i Profilu</span>
           </button>
         </div>
       </div>
