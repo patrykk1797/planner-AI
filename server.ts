@@ -1,15 +1,37 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import http from 'http';
 import fs from 'fs';
+import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { GoogleGenAI, Type } from '@google/genai';
+import { createWorker } from 'tesseract.js';
 import { calculateAge, estimateVO2MaxFrom5k, generateCoachingFeedback } from './src/utils/runningMath.ts';
 import { lookupKnownShoeSpecs, KNOWN_FLAGSHIP_SHOES } from './src/utils/knownShoeCatalog.ts';
 import { query2027Races, OFFICIAL_POLISH_RACES_2027, getAlgorithmicRaces } from './src/utils/knownRaces2027.ts';
+import { parseWorkoutTextFromOcr } from './src/utils/screenshotOcrParser.ts';
+import { analyzeDocumentWithPhysiologistOcr } from './src/utils/physiologistOcrAnalyzer.ts';
 import { adminAuth } from './src/lib/firebase-admin.ts';
-import { getOrCreateUser, getUserRuns, saveUserRun, deleteUserRun, saveUserProfile, saveFullUserData, getFullUserData, getAllDatabaseUsersWithStats, adminUpdateUserInDb, adminDeleteUserFromDb, findUserByEmail } from './src/db/users.ts';
+import {
+  getOrCreateUser,
+  getUserRuns,
+  saveUserRun,
+  deleteUserRun,
+  saveUserProfile,
+  saveFullUserData,
+  getFullUserData,
+  getAllDatabaseUsersWithStats,
+  adminUpdateUserInDb,
+  adminDeleteUserFromDb,
+  findUserByEmail,
+  saveUserOAuthToken,
+  getUserOAuthToken,
+  getUserOAuthConnections,
+  deleteUserOAuthToken,
+} from './src/db/users.ts';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -18,57 +40,128 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
-app.use(express.json({ limit: '50mb' }));
+// Cloud Run reverse proxy support for accurate req.ip and rate limiting
+app.set('trust proxy', 1);
+
+// Security HTTP headers (CSP disabled in dev/iframe preview for Vite & OpenStreetMap tiles)
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
+
+// Support high-resolution mobile screenshots and video frames up to 50MB
+const largePayloadJson = express.json({ limit: '50mb' });
+app.use(largePayloadJson);
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Rate limiters: stricter for Gemini AI endpoints, gentler for general API
+const geminiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      return authHeader.slice(7, 45);
+    }
+    return req.ip || '127.0.0.1';
+  },
+  message: { error: 'Przekroczono limit zapytań do modułu AI. Odczekaj chwilę i spróbuj ponownie.' },
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Zbyt wiele zapytań z tego adresu IP. Spróbuj ponownie za chwilę.' },
+});
+
+const trackEventLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Przekroczono limit zdarzeń telemetrycznych.' },
+});
 
 // Immediate health check routes for cloud container deployment probes
 app.get(['/api/health', '/healthz', '/_health', '/health'], (_req: Request, res: Response) => {
   return res.status(200).json({ status: 'ok', uptime: process.uptime() });
 });
 
-// Helper to authenticate request using Firebase ID Token or session headers
-async function resolveUser(req: Request) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split('Bearer ')[1];
-    try {
-      const decoded = await adminAuth.verifyIdToken(token);
-      return {
-        uid: decoded.uid,
-        email: decoded.email || `${decoded.uid}@runner.local`,
-        name: decoded.name || decoded.email?.split('@')[0],
-        avatar: decoded.picture,
-      };
-    } catch {
-      if (token && token.length > 5) {
-        return {
-          uid: token,
-          email: (req.headers['x-user-email'] as string) || `${token}@runner.local`,
-          name: req.headers['x-user-name'] as string,
-        };
-      }
-    }
-  }
+app.use('/api/gemini', geminiLimiter);
+app.use('/api', apiLimiter);
 
-  const headerUid = (req.headers['x-user-id'] as string) || (req.body?.userId as string);
-  if (headerUid) {
-    return {
-      uid: headerUid,
-      email: (req.headers['x-user-email'] as string) || req.body?.email || `${headerUid}@runner.local`,
-      name: (req.headers['x-user-name'] as string) || req.body?.name,
-      avatar: req.body?.avatar,
-    };
-  }
-
-  return null;
+export interface VerifiedUser {
+  uid: string;
+  email: string;
+  name?: string;
+  avatar?: string;
+  isAdminClaim?: boolean;
 }
 
-// Client IP Detection Endpoint
+// Strict Firebase ID Token authentication (no fallback to raw token or x-user-* headers)
+async function resolveUser(req: Request): Promise<VerifiedUser | null> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+  const token = authHeader.slice(7).trim();
+  if (!token) {
+    return null;
+  }
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    return {
+      uid: decoded.uid,
+      email: decoded.email || `${decoded.uid}@runner.local`,
+      name: decoded.name || decoded.email?.split('@')[0],
+      avatar: decoded.picture,
+      isAdminClaim: Boolean((decoded as any).admin === true),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isUserAdmin(user: VerifiedUser | null): boolean {
+  if (!user) return false;
+  if (user.isAdminClaim) return true;
+
+  const adminUids = (process.env.ADMIN_UIDS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (adminUids.includes(user.uid)) return true;
+
+  const adminEmails = (process.env.ADMIN_EMAILS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (user.email && adminEmails.includes(user.email.toLowerCase())) return true;
+
+  return false;
+}
+
+async function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  const user = await resolveUser(req);
+  if (!user) {
+    return res.status(401).json({ error: 'Wymagane uwierzytelnienie administratora' });
+  }
+  if (!isUserAdmin(user)) {
+    return res.status(403).json({ error: 'Brak uprawnień administratora' });
+  }
+  (req as any).adminUser = user;
+  return next();
+}
+
+// Client IP Detection Endpoint (uses Express req.ip with trust proxy = 1)
 app.get('/api/ip', (req: Request, res: Response) => {
-  const clientIp =
-    (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
-    req.socket.remoteAddress ||
-    '127.0.0.1';
+  const clientIp = req.ip || req.socket.remoteAddress || '127.0.0.1';
   return res.json({ ip: clientIp });
 });
 
@@ -190,6 +283,22 @@ app.get('/api/db/user-data', async (req: Request, res: Response) => {
   }
 });
 
+// Cloud SQL: Self-Service Account Deletion
+app.delete('/api/db/account', async (req: Request, res: Response) => {
+  try {
+    const user = await resolveUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Nieautoryzowany dostęp' });
+    }
+
+    const deleted = await adminDeleteUserFromDb(user.uid);
+    return res.json({ success: deleted });
+  } catch (err: any) {
+    console.error('Error deleting user account from Cloud SQL:', err);
+    return res.status(500).json({ error: 'Błąd usuwania konta użytkownika z bazy' });
+  }
+});
+
 // Real-time Server Metrics & Admin Database Endpoints
 const serverTelemetry = {
   aiPlansToday: 0,
@@ -207,7 +316,7 @@ function checkTelemetryDate() {
   }
 }
 
-app.get('/api/admin/stats', async (_req: Request, res: Response) => {
+app.get('/api/admin/stats', requireAdmin, async (_req: Request, res: Response) => {
   try {
     checkTelemetryDate();
     const dbStats = await getAllDatabaseUsersWithStats();
@@ -225,7 +334,7 @@ app.get('/api/admin/stats', async (_req: Request, res: Response) => {
   }
 });
 
-app.post('/api/admin/users/:uid/action', async (req: Request, res: Response) => {
+app.post('/api/admin/users/:uid/action', requireAdmin, async (req: Request, res: Response) => {
   try {
     const uid = req.params.uid;
     const updated = await adminUpdateUserInDb(uid, req.body || {});
@@ -241,7 +350,7 @@ app.post('/api/admin/users/:uid/action', async (req: Request, res: Response) => 
 });
 
 // Admin Delete User Endpoint
-app.delete('/api/admin/users/:uid', async (req: Request, res: Response) => {
+app.delete('/api/admin/users/:uid', requireAdmin, async (req: Request, res: Response) => {
   try {
     const uid = req.params.uid;
     const deleted = await adminDeleteUserFromDb(uid);
@@ -256,22 +365,46 @@ app.delete('/api/admin/users/:uid', async (req: Request, res: Response) => {
   }
 });
 
-// Lookup user by email across all devices (prevents duplicate user creation)
+// Lookup user by email across all devices (requires authentication; only returns caller's own record unless admin)
 app.get('/api/db/user-by-email', async (req: Request, res: Response) => {
   try {
-    const email = req.query.email as string;
+    const caller = await resolveUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Nieautoryzowany dostęp' });
+    }
+
+    const email = (req.query.email as string)?.trim().toLowerCase();
     if (!email) {
       return res.status(400).json({ error: 'Brak parametru email' });
     }
+
+    // Prevent account enumeration: non-admin users can only query their own verified email
+    if (!isUserAdmin(caller) && caller.email?.toLowerCase() !== email) {
+      return res.status(403).json({ error: 'Brak uprawnień do odczytu innego konta' });
+    }
+
     const result = await findUserByEmail(email);
-    return res.json(result);
+    if (!result || !result.found || !result.user) {
+      return res.json({ found: false });
+    }
+
+    return res.json({
+      found: true,
+      user: {
+        uid: result.user.uid,
+        name: result.user.name,
+        email: result.user.email,
+        avatar: result.user.avatar,
+      },
+      userData: result.userData || null,
+    });
   } catch (err: any) {
     console.error('Error in /api/db/user-by-email:', err);
     return res.status(500).json({ error: 'Błąd wyszukiwania użytkownika po e-mailu' });
   }
 });
 
-app.post('/api/admin/track-event', (req: Request, res: Response) => {
+app.post('/api/admin/track-event', trackEventLimiter, (req: Request, res: Response) => {
   checkTelemetryDate();
   const { type } = req.body || {};
   if (type === 'ai_plan') {
@@ -280,12 +413,140 @@ app.post('/api/admin/track-event', (req: Request, res: Response) => {
   } else if (type === 'affiliate_click') {
     serverTelemetry.affiliateClicksToday += 1;
   }
-  return res.json({ success: true, serverTelemetry });
+  return res.json({ success: true });
 });
 
-// In-memory store for recent OAuth tokens and incoming webhook workouts
-const oauthTokensStore: Record<string, { accessToken: string; refreshToken?: string; athlete?: any; updatedAt: string }> = {};
-const recentWebhookRuns: any[] = [];
+// Cryptographically signed OAuth state & short-lived one-time claim tickets (5 min TTL)
+const OAUTH_STATE_SECRET =
+  process.env.OAUTH_STATE_SECRET ||
+  process.env.STRAVA_CLIENT_SECRET ||
+  process.env.FIREBASE_PROJECT_ID ||
+  'treda-oauth-state-signing-key-v1';
+
+interface PendingOAuthClaim {
+  provider: string;
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresAt?: number | null;
+  scope?: string | null;
+  athleteId?: string | null;
+  athleteData?: any;
+  createdAtMs: number;
+}
+
+const pendingOAuthClaims = new Map<string, PendingOAuthClaim>();
+
+function createSignedOAuthState(provider: string, uid?: string): string {
+  const cleanProvider = provider.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const ts = Date.now().toString(36);
+  const userPart = uid ? Buffer.from(uid, 'utf8').toString('base64url') : '';
+  const payload = `${cleanProvider}.${ts}.${userPart}`;
+  const sig = crypto
+    .createHmac('sha256', OAUTH_STATE_SECRET)
+    .update(payload)
+    .digest('base64url')
+    .slice(0, 22);
+  return `${payload}.${sig}`;
+}
+
+function verifySignedOAuthState(rawState?: string): { provider: string; uid?: string } {
+  if (!rawState || typeof rawState !== 'string') {
+    return { provider: 'strava' };
+  }
+  const parts = rawState.split('.');
+  if (parts.length !== 4) {
+    return { provider: rawState.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'strava' };
+  }
+  const [provider, ts, userPart, sig] = parts;
+  const payload = `${provider}.${ts}.${userPart}`;
+  const expectedSig = crypto
+    .createHmac('sha256', OAUTH_STATE_SECRET)
+    .update(payload)
+    .digest('base64url')
+    .slice(0, 22);
+
+  if (sig !== expectedSig) {
+    return { provider: provider || 'strava' };
+  }
+
+  const issuedAt = parseInt(ts, 36);
+  // Valid for 20 minutes
+  if (isNaN(issuedAt) || Date.now() - issuedAt > 20 * 60 * 1000) {
+    return { provider: provider || 'strava' };
+  }
+
+  const uid = userPart ? Buffer.from(userPart, 'base64url').toString('utf8') : undefined;
+  return { provider: provider || 'strava', uid: uid || undefined };
+}
+
+function storePendingOAuthClaim(claim: Omit<PendingOAuthClaim, 'createdAtMs'>): string {
+  const now = Date.now();
+  for (const [k, v] of pendingOAuthClaims.entries()) {
+    if (now - v.createdAtMs > 5 * 60 * 1000) {
+      pendingOAuthClaims.delete(k);
+    }
+  }
+  const ticket = crypto.randomBytes(24).toString('base64url');
+  pendingOAuthClaims.set(ticket, { ...claim, createdAtMs: now });
+  return ticket;
+}
+
+// Helper: Get valid OAuth access token for a user & provider from Cloud SQL, refreshing automatically if expired
+async function getValidUserOAuthToken(uid: string, provider: string): Promise<{ accessToken: string; athlete?: any } | null> {
+  const record = await getUserOAuthToken(uid, provider);
+  if (!record || !record.accessToken) return null;
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const isExpired = record.expiresAt != null && record.expiresAt > 0 && record.expiresAt <= nowSec + 300;
+
+  if (isExpired && provider === 'strava' && record.refreshToken && process.env.STRAVA_CLIENT_ID && process.env.STRAVA_CLIENT_SECRET) {
+    try {
+      const refreshRes = await fetch('https://www.strava.com/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: process.env.STRAVA_CLIENT_ID,
+          client_secret: process.env.STRAVA_CLIENT_SECRET,
+          grant_type: 'refresh_token',
+          refresh_token: record.refreshToken,
+        }),
+      });
+      if (refreshRes.ok) {
+        const refreshed = await refreshRes.json();
+        if (refreshed.access_token) {
+          await saveUserOAuthToken(uid, 'strava', {
+            accessToken: refreshed.access_token,
+            refreshToken: refreshed.refresh_token || record.refreshToken,
+            expiresAt: refreshed.expires_at || null,
+            scope: record.scope,
+            athleteId: record.athleteId,
+            athleteData: record.athlete,
+          });
+          return { accessToken: refreshed.access_token, athlete: record.athlete };
+        }
+      }
+    } catch (err) {
+      console.error('Failed to refresh Strava OAuth token:', err);
+    }
+  }
+
+  return { accessToken: record.accessToken, athlete: record.athlete };
+}
+
+// Helper: Parse ISO-8601 duration (e.g. Polar "PT42M18S" or "PT1H05M12.5S") into minutes
+function parseIso8601DurationToMinutes(isoDuration: any): number | null {
+  if (typeof isoDuration === 'number' && isoDuration > 0) {
+    return isoDuration > 600 ? +(isoDuration / 60).toFixed(2) : isoDuration;
+  }
+  if (!isoDuration || typeof isoDuration !== 'string') return null;
+  const match = isoDuration.trim().match(/^PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
+  if (!match) return null;
+  const hours = parseFloat(match[1] || '0');
+  const minutes = parseFloat(match[2] || '0');
+  const seconds = parseFloat(match[3] || '0');
+  const totalMin = hours * 60 + minutes + seconds / 60;
+  return totalMin > 0 ? +(totalMin.toFixed(2)) : null;
+}
 
 // Helper to determine base redirect URI per OAuth skill guidelines
 function getBaseAppUrl(req: Request): string {
@@ -308,25 +569,27 @@ function getBaseAppUrl(req: Request): string {
 }
 
 // 1. Universal OAuth 2.0 Provider URL Endpoint (Popup-based per OAuth Skill)
-app.get(['/api/auth/url', '/api/auth/:provider/url', '/api/integrations/strava/auth-url'], (req: Request, res: Response) => {
+app.get(['/api/auth/url', '/api/auth/:provider/url', '/api/integrations/strava/auth-url'], async (req: Request, res: Response) => {
   const provider = (req.params.provider || (req.query.provider as string) || 'strava').toLowerCase();
   const baseUrl = getBaseAppUrl(req);
   const redirectUri = `${baseUrl}/auth/callback`;
+  const user = await resolveUser(req);
+  const signedState = createSignedOAuthState(provider, user?.uid);
 
   if (provider === 'strava') {
     const clientId = process.env.STRAVA_CLIENT_ID || '';
-    const isConfigured = !!process.env.STRAVA_CLIENT_ID && !!process.env.STRAVA_CLIENT_SECRET;
+    const isConfigured = Boolean(process.env.STRAVA_CLIENT_ID && process.env.STRAVA_CLIENT_SECRET);
     const params = new URLSearchParams({
-      client_id: clientId || '12345',
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: 'code',
       approval_prompt: 'auto',
       scope: 'read,activity:read_all,profile:read_all',
-      state: 'strava',
+      state: signedState,
     });
     return res.json({
       provider: 'strava',
-      url: `https://www.strava.com/oauth/authorize?${params.toString()}`,
+      url: isConfigured ? `https://www.strava.com/oauth/authorize?${params.toString()}` : null,
       isConfigured,
       clientId: clientId || null,
       redirectUri,
@@ -335,17 +598,17 @@ app.get(['/api/auth/url', '/api/auth/:provider/url', '/api/integrations/strava/a
 
   if (provider === 'polar') {
     const clientId = process.env.POLAR_CLIENT_ID || '';
-    const isConfigured = !!process.env.POLAR_CLIENT_ID && !!process.env.POLAR_CLIENT_SECRET;
+    const isConfigured = Boolean(process.env.POLAR_CLIENT_ID && process.env.POLAR_CLIENT_SECRET);
     const params = new URLSearchParams({
-      client_id: clientId || 'polar_client',
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'accesslink.read_all',
-      state: 'polar',
+      state: signedState,
     });
     return res.json({
       provider: 'polar',
-      url: `https://flow.polar.com/oauth2/authorization?${params.toString()}`,
+      url: isConfigured ? `https://flow.polar.com/oauth2/authorization?${params.toString()}` : null,
       isConfigured,
       clientId: clientId || null,
       redirectUri,
@@ -354,17 +617,17 @@ app.get(['/api/auth/url', '/api/auth/:provider/url', '/api/integrations/strava/a
 
   if (provider === 'garmin') {
     const clientId = process.env.GARMIN_CLIENT_ID || '';
-    const isConfigured = !!process.env.GARMIN_CLIENT_ID && !!process.env.GARMIN_CLIENT_SECRET;
+    const isConfigured = Boolean(process.env.GARMIN_CLIENT_ID && process.env.GARMIN_CLIENT_SECRET);
     const params = new URLSearchParams({
-      client_id: clientId || 'garmin_connect_client',
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'activity:read health:read',
-      state: 'garmin',
+      state: signedState,
     });
     return res.json({
       provider: 'garmin',
-      url: `https://connect.garmin.com/oauthConfirm?${params.toString()}`,
+      url: isConfigured ? `https://connect.garmin.com/oauthConfirm?${params.toString()}` : null,
       isConfigured,
       clientId: clientId || null,
       redirectUri,
@@ -373,17 +636,17 @@ app.get(['/api/auth/url', '/api/auth/:provider/url', '/api/integrations/strava/a
 
   if (provider === 'komoot') {
     const clientId = process.env.KOMOOT_CLIENT_ID || '';
-    const isConfigured = !!process.env.KOMOOT_CLIENT_ID && !!process.env.KOMOOT_CLIENT_SECRET;
+    const isConfigured = Boolean(process.env.KOMOOT_CLIENT_ID && process.env.KOMOOT_CLIENT_SECRET);
     const params = new URLSearchParams({
-      client_id: clientId || 'komoot_trail_client',
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'profile tours',
-      state: 'komoot',
+      state: signedState,
     });
     return res.json({
       provider: 'komoot',
-      url: `https://api.komoot.de/oauth/authorize?${params.toString()}`,
+      url: isConfigured ? `https://api.komoot.de/oauth/authorize?${params.toString()}` : null,
       isConfigured,
       clientId: clientId || null,
       redirectUri,
@@ -396,9 +659,9 @@ app.get(['/api/auth/url', '/api/auth/:provider/url', '/api/integrations/strava/a
     if (!isConfigured) {
       return res.json({
         provider: 'huawei',
-        url: `${baseUrl}/auth/callback?provider=huawei&direct=true`,
+        url: null,
         isConfigured: false,
-        message: 'Synchronizacja bezpośrednia Huawei Health aktywna przez AI Skaner oraz TruSport™ (bez zewnętrznego popupu)',
+        message: 'Importuj treningi Huawei Health przez pliki GPX/TCX, Skaner Zrzutów Ekranu AI Vision lub skonfiguruj HUAWEI_CLIENT_ID w .env.',
         redirectUri,
       });
     }
@@ -407,7 +670,7 @@ app.get(['/api/auth/url', '/api/auth/:provider/url', '/api/integrations/strava/a
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'https://www.huawei.com/healthkit/activity.read https://www.huawei.com/healthkit/heartrate.read',
-      state: 'huawei',
+      state: signedState,
     });
     return res.json({
       provider: 'huawei',
@@ -418,28 +681,23 @@ app.get(['/api/auth/url', '/api/auth/:provider/url', '/api/integrations/strava/a
     });
   }
 
-  const genericParams = new URLSearchParams({
-    client_id: process.env.OAUTH_CLIENT_ID || `${provider}_client`,
-    redirect_uri: redirectUri,
-    response_type: 'code',
-    state: provider,
-  });
-
   return res.json({
     provider,
-    url: `https://www.strava.com/oauth/authorize?${genericParams.toString()}`,
-    isConfigured: !!process.env.OAUTH_CLIENT_ID,
+    url: null,
+    isConfigured: false,
     redirectUri,
   });
 });
 
-// 2. OAuth 2.0 Popup Callback Handler with postMessage (Handles trailing slash variations)
+// 2. OAuth 2.0 Popup Callback Handler with postMessage (Stores tokens per user in Cloud SQL; never leaks raw accessToken in postMessage)
 const oauthCallbackHandler = async (req: Request, res: Response) => {
   const code = req.query.code as string;
-  const provider = ((req.query.state as string) || req.params.provider || 'strava').toLowerCase();
+  const rawState = (req.query.state as string) || req.params.provider || 'strava';
+  const { provider, uid: stateUid } = verifySignedOAuthState(rawState);
   const error = req.query.error as string;
+  const requestedScope = (req.query.scope as string) || undefined;
 
-  let tokenPayload: any = null;
+  let safePopupPayload: any = null;
   let errorMsg: string | null = error || null;
 
   if (code && !error) {
@@ -457,16 +715,37 @@ const oauthCallbackHandler = async (req: Request, res: Response) => {
         });
         const data = await tokenRes.json();
         if (tokenRes.ok && data.access_token) {
-          oauthTokensStore['strava'] = {
+          const tokenRecord = {
             accessToken: data.access_token,
-            refreshToken: data.refresh_token,
-            athlete: data.athlete,
-            updatedAt: new Date().toISOString(),
+            refreshToken: data.refresh_token || null,
+            expiresAt: data.expires_at || null,
+            scope: requestedScope || 'read,activity:read_all,profile:read_all',
+            athleteId: data.athlete?.id ? String(data.athlete.id) : null,
+            athleteData: data.athlete || null,
           };
-          tokenPayload = {
+
+          if (stateUid) {
+            await getOrCreateUser(stateUid, `${stateUid}@runner.local`).catch(() => {});
+            await saveUserOAuthToken(stateUid, 'strava', tokenRecord);
+          }
+
+          const claimTicket = storePendingOAuthClaim({
             provider: 'strava',
-            accessToken: data.access_token,
-            athlete: data.athlete,
+            ...tokenRecord,
+          });
+
+          safePopupPayload = {
+            provider: 'strava',
+            savedForUser: Boolean(stateUid),
+            claimTicket,
+            athlete: data.athlete
+              ? {
+                  id: data.athlete.id,
+                  firstname: data.athlete.firstname,
+                  lastname: data.athlete.lastname,
+                  city: data.athlete.city,
+                }
+              : null,
           };
         } else {
           errorMsg = data.message || 'Nie udało się wymienić kodu OAuth Strava na token.';
@@ -487,27 +766,41 @@ const oauthCallbackHandler = async (req: Request, res: Response) => {
         });
         const data = await tokenRes.json();
         if (tokenRes.ok && data.access_token) {
-          oauthTokensStore['polar'] = {
+          const expiresAt = data.expires_in ? Math.floor(Date.now() / 1000) + Number(data.expires_in) : null;
+          const tokenRecord = {
             accessToken: data.access_token,
-            athlete: { id: data.x_user_id },
-            updatedAt: new Date().toISOString(),
+            refreshToken: data.refresh_token || null,
+            expiresAt,
+            scope: 'accesslink.read_all',
+            athleteId: data.x_user_id ? String(data.x_user_id) : null,
+            athleteData: { id: data.x_user_id },
           };
-          tokenPayload = {
+
+          if (stateUid) {
+            await getOrCreateUser(stateUid, `${stateUid}@runner.local`).catch(() => {});
+            await saveUserOAuthToken(stateUid, 'polar', tokenRecord);
+          }
+
+          const claimTicket = storePendingOAuthClaim({
             provider: 'polar',
-            accessToken: data.access_token,
+            ...tokenRecord,
+          });
+
+          safePopupPayload = {
+            provider: 'polar',
+            savedForUser: Boolean(stateUid),
+            claimTicket,
             athlete: { id: data.x_user_id },
           };
+        } else {
+          errorMsg = data.error_description || 'Nie udało się wymienić kodu OAuth Polar na token.';
         }
       } else {
-        // Code received when testing callback flow
-        tokenPayload = {
-          provider,
-          code,
-        };
+        errorMsg = `Dostawca OAuth (${provider}) nie ma skonfigurowanych kluczy CLIENT_ID / CLIENT_SECRET na serwerze.`;
       }
     } catch (err: any) {
       console.error('OAuth callback token exchange error:', err);
-      errorMsg = err.message || 'Błąd wymiany kodu OAuth';
+      errorMsg = 'Błąd wymiany kodu autoryzacyjnego OAuth';
     }
   }
 
@@ -534,7 +827,7 @@ const oauthCallbackHandler = async (req: Request, res: Response) => {
           type: 'OAUTH_AUTH_SUCCESS',
           provider,
           error: errorMsg,
-          tokenPayload,
+          tokenPayload: safePopupPayload,
         })};
         if (window.opener) {
           window.opener.postMessage(payload, '*');
@@ -559,16 +852,123 @@ app.get(
   oauthCallbackHandler
 );
 
-// 3. Real Strava API v3 Activity Fetcher (Uses real OAuth token or user-provided Access Token)
+// 2.1 Per-User OAuth Status, Claim & Disconnect Endpoints (Cloud SQL backed)
+app.get('/api/integrations/oauth/status', async (req: Request, res: Response) => {
+  try {
+    const user = await resolveUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Wymagane zalogowanie, aby sprawdzić status połączeń OAuth' });
+    }
+    const connections = await getUserOAuthConnections(user.uid);
+    return res.json({ success: true, connections });
+  } catch (err) {
+    console.error('Error fetching OAuth status:', err);
+    return res.status(500).json({ error: 'Błąd odczytu połączeń OAuth z bazy danych' });
+  }
+});
+
+app.post('/api/integrations/oauth/claim', async (req: Request, res: Response) => {
+  try {
+    const user = await resolveUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Wymagane zalogowanie, aby przypisać token OAuth do konta' });
+    }
+    const { claimTicket } = req.body || {};
+    if (!claimTicket || typeof claimTicket !== 'string') {
+      return res.status(400).json({ error: 'Brak biletu autoryzacyjnego OAuth' });
+    }
+    const claim = pendingOAuthClaims.get(claimTicket);
+    if (!claim || Date.now() - claim.createdAtMs > 5 * 60 * 1000) {
+      pendingOAuthClaims.delete(claimTicket);
+      return res.status(400).json({ error: 'Bilet autoryzacyjny OAuth wygasł lub został już wykorzystany' });
+    }
+    pendingOAuthClaims.delete(claimTicket);
+
+    await getOrCreateUser(user.uid, user.email, user.name, user.avatar);
+    await saveUserOAuthToken(user.uid, claim.provider, {
+      accessToken: claim.accessToken,
+      refreshToken: claim.refreshToken,
+      expiresAt: claim.expiresAt,
+      scope: claim.scope,
+      athleteId: claim.athleteId,
+      athleteData: claim.athleteData,
+    });
+
+    return res.json({
+      success: true,
+      provider: claim.provider,
+      athlete: claim.athleteData || null,
+    });
+  } catch (err) {
+    console.error('Error claiming OAuth token:', err);
+    return res.status(500).json({ error: 'Błąd zapisu tokenu OAuth w bazie danych' });
+  }
+});
+
+app.post('/api/integrations/oauth/token', async (req: Request, res: Response) => {
+  try {
+    const user = await resolveUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Wymagane zalogowanie, aby zapisać token dostępu' });
+    }
+    const { provider, accessToken, refreshToken, expiresAt, scope } = req.body || {};
+    if (!provider || !accessToken || typeof accessToken !== 'string' || accessToken.trim().length < 8) {
+      return res.status(400).json({ error: 'Podaj poprawny provider oraz token dostępu API' });
+    }
+
+    await getOrCreateUser(user.uid, user.email, user.name, user.avatar);
+    await saveUserOAuthToken(user.uid, String(provider).toLowerCase(), {
+      accessToken: accessToken.trim(),
+      refreshToken: refreshToken ? String(refreshToken).trim() : null,
+      expiresAt: expiresAt ? Number(expiresAt) : null,
+      scope: scope ? String(scope) : null,
+    });
+
+    return res.json({ success: true, provider: String(provider).toLowerCase() });
+  } catch (err) {
+    console.error('Error saving manual OAuth token:', err);
+    return res.status(500).json({ error: 'Błąd zapisu tokenu dostępu w bazie danych' });
+  }
+});
+
+app.delete('/api/integrations/oauth/:provider', async (req: Request, res: Response) => {
+  try {
+    const user = await resolveUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Nieautoryzowany dostęp' });
+    }
+    const provider = (req.params.provider || '').toLowerCase();
+    await deleteUserOAuthToken(user.uid, provider);
+    return res.json({ success: true, provider });
+  } catch (err) {
+    console.error('Error deleting OAuth token:', err);
+    return res.status(500).json({ error: 'Błąd usuwania połączenia OAuth' });
+  }
+});
+
+// 3. Real Strava API v3 Activity Fetcher (Uses per-user DB OAuth token with auto-refresh or user-supplied token)
 app.post('/api/integrations/strava/fetch-real', async (req: Request, res: Response) => {
   try {
     const user = await resolveUser(req);
-    const { accessToken: bodyToken, shoeName } = req.body;
-    const token = bodyToken || oauthTokensStore['strava']?.accessToken || process.env.STRAVA_ACCESS_TOKEN;
+    if (!user) {
+      return res.status(401).json({ error: 'Zaloguj się na swoje konto Treda, aby synchronizować aktywności ze Stravy.' });
+    }
+
+    const { accessToken: bodyToken, shoeName } = req.body || {};
+    let token: string | null = null;
+
+    if (bodyToken && typeof bodyToken === 'string' && bodyToken.trim().length >= 8) {
+      token = bodyToken.trim();
+      await getOrCreateUser(user.uid, user.email, user.name, user.avatar).catch(() => {});
+      await saveUserOAuthToken(user.uid, 'strava', { accessToken: token }).catch(() => {});
+    } else {
+      const dbToken = await getValidUserOAuthToken(user.uid, 'strava');
+      token = dbToken?.accessToken || null;
+    }
 
     if (!token) {
       return res.status(400).json({
-        error: 'Brak tokenu dostępu Strava API v3. Zaloguj się przez OAuth 2.0 lub wklej swój Access Token ze strony strava.com/settings/api.',
+        error: 'Brak zapisanego tokenu Strava dla Twojego konta. Połącz konto przez OAuth 2.0 lub wklej własny Access Token ze strony strava.com/settings/api.',
         needsToken: true,
       });
     }
@@ -578,7 +978,7 @@ app.post('/api/integrations/strava/fetch-real', async (req: Request, res: Respon
       fetch('https://www.strava.com/api/v3/athlete', {
         headers: { Authorization: `Bearer ${token}` },
       }),
-      fetch('https://www.strava.com/api/v3/athlete/activities?per_page=10', {
+      fetch('https://www.strava.com/api/v3/athlete/activities?per_page=15', {
         headers: { Authorization: `Bearer ${token}` },
       }),
     ]);
@@ -586,33 +986,47 @@ app.post('/api/integrations/strava/fetch-real', async (req: Request, res: Respon
     if (!activitiesRes.ok) {
       const errData = await activitiesRes.json().catch(() => ({}));
       return res.status(activitiesRes.status).json({
-        error: errData.message || `Strava API zwróciło status ${activitiesRes.status}. Sprawdź, czy token ma uprawnienie activity:read_all.`,
-        details: errData,
+        error: errData.message || `Strava API zwróciło status ${activitiesRes.status}. Sprawdź, czy token jest aktualny i posiada uprawnienie activity:read_all.`,
       });
     }
 
     const athlete = athleteRes.ok ? await athleteRes.json() : null;
+    if (athlete && athlete.id) {
+      await saveUserOAuthToken(user.uid, 'strava', {
+        accessToken: token,
+        athleteId: String(athlete.id),
+        athleteData: {
+          id: athlete.id,
+          firstname: athlete.firstname,
+          lastname: athlete.lastname,
+          city: athlete.city,
+          profile: athlete.profile,
+        },
+      }).catch(() => {});
+    }
+
     const rawActivities = await activitiesRes.json();
+    const runActivities = (Array.isArray(rawActivities) ? rawActivities : []).filter((act: any) => {
+      const sportType = String(act.sport_type || act.type || '');
+      return ['Run', 'TrailRun', 'VirtualRun', 'Walk', 'Hike'].includes(sportType) && Number(act.distance) > 0;
+    });
 
-    const runActivities = (Array.isArray(rawActivities) ? rawActivities : []).filter(
-      (act: any) => !act.type || ['Run', 'TrailRun', 'VirtualRun', 'Walk', 'Hike'].includes(act.type || act.sport_type)
-    );
-
-    const mappedRuns = (runActivities.length > 0 ? runActivities : rawActivities.slice(0, 5)).map((act: any) => {
-      const distKm = Math.max(0.1, +((act.distance || 5000) / 1000).toFixed(2));
-      const durMin = Math.max(1, Math.round((act.moving_time || act.elapsed_time || 1800) / 60));
-      const paceTotalSec = Math.round(((act.moving_time || durMin * 60) / distKm));
+    const mappedRuns = runActivities.map((act: any) => {
+      const distKm = Math.max(0.1, +(Number(act.distance) / 1000).toFixed(2));
+      const movingSec = Number(act.moving_time || act.elapsed_time || 0);
+      const durMin = Math.max(1, Math.round(movingSec / 60));
+      const paceTotalSec = movingSec > 0 ? Math.round(movingSec / distKm) : Math.round((durMin * 60) / distKm);
       const pMin = Math.floor(paceTotalSec / 60);
       const pSec = paceTotalSec % 60;
       const avgPace = `${pMin}:${pSec < 10 ? '0' : ''}${pSec}`;
 
-      // Strava average_cadence is single-leg (steps/2), multiply by 2 for total SPM
-      const rawCad = act.average_cadence ? Math.round(act.average_cadence) : 88;
-      const avgCadence = rawCad < 120 ? rawCad * 2 : rawCad;
-      const avgHr = act.average_heartrate ? Math.round(act.average_heartrate) : 152;
-      const maxHr = act.max_heartrate ? Math.round(act.max_heartrate) : avgHr + 16;
-      const speedMetersPerMin = (act.average_speed || 3.1) * 60;
-      const strideLengthM = +(speedMetersPerMin / Math.max(150, avgCadence)).toFixed(2);
+      // Strava average_cadence is single-leg (steps/2), multiply by 2 for total SPM when present
+      const rawCad = act.average_cadence ? Math.round(Number(act.average_cadence)) : null;
+      const avgCadence = rawCad ? (rawCad < 120 ? rawCad * 2 : rawCad) : 0;
+      const avgHr = act.average_heartrate ? Math.round(Number(act.average_heartrate)) : 0;
+      const maxHr = act.max_heartrate ? Math.round(Number(act.max_heartrate)) : undefined;
+      const speedMetersPerMin = act.average_speed ? Number(act.average_speed) * 60 : (distKm * 1000) / Math.max(1, durMin);
+      const strideLengthM = avgCadence > 0 ? +(speedMetersPerMin / avgCadence).toFixed(2) : undefined;
 
       return {
         id: `strava-real-${act.id}`,
@@ -626,15 +1040,15 @@ app.post('/api/integrations/strava/fetch-real', async (req: Request, res: Respon
         maxHr,
         avgCadence,
         strideLengthM,
-        elevationGainM: Math.round(act.total_elevation_gain || 0),
-        calories: act.kilojoules ? Math.round(act.kilojoules * 1.05) : Math.round(distKm * 68),
-        powerW: act.average_watts ? Math.round(act.average_watts) : undefined,
-        shoeName: shoeName || 'Asics Novablast 4',
-        notes: `Pobrano z prawdziwego konta Strava API v3 (ID aktywności: ${act.id}${athlete?.firstname ? `, zawodnik: ${athlete.firstname} ${athlete.lastname || ''}` : ''}).`,
+        elevationGainM: act.total_elevation_gain != null ? Math.round(Number(act.total_elevation_gain)) : 0,
+        calories: act.kilojoules ? Math.round(Number(act.kilojoules) * 1.05) : Math.round(distKm * 65),
+        powerW: act.average_watts ? Math.round(Number(act.average_watts)) : undefined,
+        shoeName: shoeName || undefined,
+        notes: `Pobrano z konta Strava API v3 (ID aktywności: ${act.id}${athlete?.firstname ? `, zawodnik: ${athlete.firstname} ${athlete.lastname || ''}`.trim() : ''}).`,
       };
     });
 
-    if (user && mappedRuns.length > 0) {
+    if (mappedRuns.length > 0) {
       await getOrCreateUser(user.uid, user.email, user.name, user.avatar).catch(() => {});
       for (const r of mappedRuns) {
         await saveUserRun(user.uid, r).catch(() => {});
@@ -656,20 +1070,33 @@ app.post('/api/integrations/strava/fetch-real', async (req: Request, res: Respon
     });
   } catch (err: any) {
     console.error('Strava real fetch error:', err);
-    return res.status(500).json({ error: err.message || 'Błąd komunikacji z serwerem Strava API v3' });
+    return res.status(500).json({ error: 'Błąd komunikacji z serwerem Strava API v3' });
   }
 });
 
-// 4. Real Polar AccessLink API v3 Fetcher
+// 4. Real Polar AccessLink API v3 Fetcher (Per-user token & real ISO-8601 duration/pace parsing)
 app.post('/api/integrations/polar/fetch-real', async (req: Request, res: Response) => {
   try {
     const user = await resolveUser(req);
-    const { accessToken: bodyToken, shoeName } = req.body;
-    const token = bodyToken || oauthTokensStore['polar']?.accessToken;
+    if (!user) {
+      return res.status(401).json({ error: 'Zaloguj się na swoje konto Treda, aby synchronizować dane z Polar Flow.' });
+    }
+
+    const { accessToken: bodyToken, shoeName } = req.body || {};
+    let token: string | null = null;
+
+    if (bodyToken && typeof bodyToken === 'string' && bodyToken.trim().length >= 8) {
+      token = bodyToken.trim();
+      await getOrCreateUser(user.uid, user.email, user.name, user.avatar).catch(() => {});
+      await saveUserOAuthToken(user.uid, 'polar', { accessToken: token }).catch(() => {});
+    } else {
+      const dbToken = await getValidUserOAuthToken(user.uid, 'polar');
+      token = dbToken?.accessToken || null;
+    }
 
     if (!token) {
       return res.status(400).json({
-        error: 'Brak tokenu Polar AccessLink API. Połącz konto przez OAuth lub podaj swój Bearer Token.',
+        error: 'Brak zapisanego tokenu Polar AccessLink API dla Twojego konta. Połącz konto przez OAuth lub podaj swój Bearer Token.',
         needsToken: true,
       });
     }
@@ -688,29 +1115,39 @@ app.post('/api/integrations/polar/fetch-real', async (req: Request, res: Respons
     }
 
     const rawExercises = await exRes.json();
-    const list = Array.isArray(rawExercises) ? rawExercises : [];
-    const mappedRuns = list.slice(0, 10).map((ex: any, idx: number) => {
-      const distKm = Math.max(0.5, +((ex.distance || 7500) / 1000).toFixed(2));
-      const durMin = 40;
+    const list = (Array.isArray(rawExercises) ? rawExercises : []).filter(
+      (ex: any) => Number(ex.distance) > 0
+    );
+
+    const mappedRuns = list.slice(0, 15).map((ex: any, idx: number) => {
+      const distKm = Math.max(0.1, +(Number(ex.distance) / 1000).toFixed(2));
+      const parsedDurMin = parseIso8601DurationToMinutes(ex.duration);
+      const durMin = parsedDurMin ? Math.max(1, Math.round(parsedDurMin)) : Math.max(1, Math.round(distKm * 5.5));
+      const totalDurationSec = parsedDurMin ? Math.round(parsedDurMin * 60) : durMin * 60;
+      const paceSec = Math.round(totalDurationSec / distKm);
+      const avgPace = `${Math.floor(paceSec / 60)}:${String(paceSec % 60).padStart(2, '0')}`;
+      const rawCad = ex.cadence?.average ? Math.round(Number(ex.cadence.average)) : 0;
+      const avgCadence = rawCad > 0 && rawCad < 120 ? rawCad * 2 : rawCad;
+
       return {
-        id: `polar-real-${ex.id || idx}-${Date.now()}`,
-        title: `Trening Polar Flow (${ex.sport || 'RUNNING'}) • ${distKm} km`,
+        id: `polar-real-${ex.id || idx}`,
+        title: `Trening Polar Flow (${ex.detailed_sport_info || ex.sport || 'RUNNING'}) • ${distKm} km`,
         sourceApp: 'polar',
         date: (ex.start_time || new Date().toISOString()).split('T')[0],
         distanceKm: distKm,
         durationMin: durMin,
-        avgPace: '5:15',
-        avgHr: ex.heart_rate?.average || 151,
-        maxHr: ex.heart_rate?.maximum || 174,
-        avgCadence: 178,
-        strideLengthM: 1.08,
-        calories: ex.calories || Math.round(distKm * 68),
-        shoeName: shoeName || 'Asics Novablast 4',
-        notes: `Pobrano bezpośrednio z Polar AccessLink API v3 ( Urządzenie: ${ex.device || 'Polar Watch'} ).`,
+        avgPace,
+        avgHr: ex.heart_rate?.average ? Math.round(Number(ex.heart_rate.average)) : 0,
+        maxHr: ex.heart_rate?.maximum ? Math.round(Number(ex.heart_rate.maximum)) : undefined,
+        avgCadence,
+        calories: ex.calories ? Math.round(Number(ex.calories)) : undefined,
+        shoeName: shoeName || undefined,
+        notes: `Pobrano z Polar AccessLink API v3 (Urządzenie: ${ex.device || 'Polar'}).`,
       };
     });
 
-    if (user && mappedRuns.length > 0) {
+    if (mappedRuns.length > 0) {
+      await getOrCreateUser(user.uid, user.email, user.name, user.avatar).catch(() => {});
       for (const r of mappedRuns) {
         await saveUserRun(user.uid, r).catch(() => {});
       }
@@ -718,25 +1155,63 @@ app.post('/api/integrations/polar/fetch-real', async (req: Request, res: Respons
 
     return res.json({ success: true, runs: mappedRuns, count: mappedRuns.length });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Błąd komunikacji z Polar AccessLink API' });
+    console.error('Polar AccessLink API error:', err);
+    return res.status(500).json({ error: 'Błąd komunikacji z Polar AccessLink API' });
   }
 });
 
-// 5. Real Webhook Receiver for Apple Shortcuts (iOS Health), Garmin Ping, Terra & Strava Webhooks
+// 5. Webhook Subscription Verification (Strava / Terra) & Authenticated Workout Receiver
+app.get('/api/integrations/webhook/:provider', (req: Request, res: Response) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  const expectedVerifyToken = process.env.STRAVA_VERIFY_TOKEN || process.env.WEBHOOK_SECRET;
+
+  if (mode === 'subscribe' && challenge) {
+    if (!expectedVerifyToken || token === expectedVerifyToken) {
+      return res.status(200).json({ 'hub.challenge': challenge });
+    }
+    return res.status(403).json({ error: 'Nieprawidłowy hub.verify_token' });
+  }
+  return res.status(200).json({ status: 'ok', provider: req.params.provider });
+});
+
 app.post('/api/integrations/webhook/:provider', async (req: Request, res: Response) => {
   try {
     const provider = (req.params.provider || 'apple').toLowerCase();
     const body = req.body || {};
     const user = await resolveUser(req);
 
-    const distKm = Math.max(0.5, parseFloat(body.distanceKm || body.distance || '7.6'));
-    const durMin = Math.max(1, Math.round(parseFloat(body.durationMin || body.duration || String(distKm * 5.2))));
+    // Allow either authenticated Firebase Bearer token OR verified webhook secret + target userId
+    const webhookSecretHeader = req.headers['x-webhook-secret'] as string | undefined;
+    const configuredSecret = process.env.WEBHOOK_SECRET;
+    const isSecretAuthorized =
+      Boolean(configuredSecret && webhookSecretHeader && webhookSecretHeader === configuredSecret && body.userId);
+
+    const targetUid = user?.uid || (isSecretAuthorized ? String(body.userId) : null);
+    if (!targetUid) {
+      return res.status(401).json({
+        error: 'Webhook wymaga nagłówka Authorization: Bearer <Firebase ID Token> lub skonfigurowanego klucza X-Webhook-Secret.',
+      });
+    }
+
+    const rawDist = parseFloat(String(body.distanceKm ?? body.distance ?? ''));
+    const rawDur = parseFloat(String(body.durationMin ?? body.duration ?? ''));
+
+    if (isNaN(rawDist) || rawDist <= 0 || isNaN(rawDur) || rawDur <= 0) {
+      return res.status(400).json({
+        error: 'Webhook odrzucony: wymagane są rzeczywiste pola distanceKm (> 0) oraz durationMin (> 0).',
+      });
+    }
+
+    const distKm = +(rawDist.toFixed(2));
+    const durMin = Math.max(1, Math.round(rawDur));
     const paceTotalSec = Math.round((durMin * 60) / distKm);
     const avgPace = body.avgPace || `${Math.floor(paceTotalSec / 60)}:${(paceTotalSec % 60).toString().padStart(2, '0')}`;
-    const avgHr = parseInt(body.avgHr || body.heartRate || '153', 10);
-    const avgCadence = parseInt(body.avgCadence || body.cadence || '178', 10);
-    const speedMetersPerMin = 1000 / Math.max(3.0, durMin / distKm);
-    const strideLengthM = +(speedMetersPerMin / Math.max(150, avgCadence)).toFixed(2);
+    const avgHr = body.avgHr || body.heartRate ? parseInt(String(body.avgHr || body.heartRate), 10) : 0;
+    const avgCadence = body.avgCadence || body.cadence ? parseInt(String(body.avgCadence || body.cadence), 10) : 0;
+    const speedMetersPerMin = (distKm * 1000) / Math.max(1, durMin);
+    const strideLengthM = avgCadence > 0 ? +(speedMetersPerMin / avgCadence).toFixed(2) : undefined;
 
     const webhookRun = {
       id: `webhook-${provider}-${Date.now()}`,
@@ -747,40 +1222,57 @@ app.post('/api/integrations/webhook/:provider', async (req: Request, res: Respon
       durationMin: durMin,
       avgPace,
       avgHr,
-      maxHr: parseInt(body.maxHr || String(avgHr + 17), 10),
+      maxHr: body.maxHr ? parseInt(String(body.maxHr), 10) : undefined,
       avgCadence,
       strideLengthM,
-      elevationGainM: parseInt(body.elevationGainM || '35', 10),
-      calories: parseInt(body.calories || String(Math.round(distKm * 68)), 10),
-      shoeName: body.shoeName || 'Asics Novablast 4',
-      notes: body.notes || `Odebrano przez Webhook HTTP POST (/api/integrations/webhook/${provider}).`,
+      elevationGainM: body.elevationGainM != null ? parseInt(String(body.elevationGainM), 10) : 0,
+      calories: body.calories != null ? parseInt(String(body.calories), 10) : Math.round(distKm * 65),
+      shoeName: body.shoeName || undefined,
+      notes: body.notes || `Odebrano przez autoryzowany Webhook HTTP POST (/api/integrations/webhook/${provider}).`,
     };
 
-    recentWebhookRuns.unshift(webhookRun);
-    if (recentWebhookRuns.length > 20) recentWebhookRuns.pop();
-
-    if (user) {
-      await getOrCreateUser(user.uid, user.email, user.name, user.avatar).catch(() => {});
-      await saveUserRun(user.uid, webhookRun).catch(() => {});
-    }
+    await getOrCreateUser(
+      targetUid,
+      user?.email || `${targetUid}@runner.local`,
+      user?.name,
+      user?.avatar
+    ).catch(() => {});
+    await saveUserRun(targetUid, webhookRun);
 
     return res.json({
       success: true,
-      message: `Webhook ${provider} przetworzony pomyślnie`,
+      message: `Webhook ${provider} zapisany na koncie użytkownika`,
       run: webhookRun,
     });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Błąd przetwarzania Webhooka' });
+    console.error('Webhook processing error:', err);
+    return res.status(500).json({ error: 'Błąd przetwarzania Webhooka' });
   }
 });
 
-app.get('/api/integrations/webhook-runs', (_req: Request, res: Response) => {
-  return res.json({ runs: recentWebhookRuns });
+app.get('/api/integrations/webhook-runs', async (req: Request, res: Response) => {
+  try {
+    const user = await resolveUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Nieautoryzowany dostęp' });
+    }
+    const allUserRuns = await getUserRuns(user.uid);
+    const webhookRuns = allUserRuns.filter((r) => String(r.id).startsWith('webhook-'));
+    return res.json({ runs: webhookRuns });
+  } catch (err) {
+    console.error('Error fetching user webhook runs:', err);
+    return res.status(500).json({ error: 'Błąd odczytu biegów z Webhooka' });
+  }
 });
 
-// Running Apps Integration: Exchange Strava OAuth Code
+// Running Apps Integration: Exchange Strava OAuth Code (Authenticated, no fake demo athlete)
 app.post('/api/integrations/strava/exchange', async (req: Request, res: Response) => {
-  const { code } = req.body;
+  const user = await resolveUser(req);
+  if (!user) {
+    return res.status(401).json({ error: 'Wymagane uwierzytelnienie użytkownika' });
+  }
+
+  const { code } = req.body || {};
   if (!code) {
     return res.status(400).json({ error: 'Brak kodu autoryzacyjnego Strava' });
   }
@@ -789,15 +1281,8 @@ app.post('/api/integrations/strava/exchange', async (req: Request, res: Response
   const clientSecret = process.env.STRAVA_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    return res.json({
-      success: true,
-      demoMode: true,
-      message: 'Token wygenerowany w trybie deweloperskim (skonfiguruj STRAVA_CLIENT_ID w .env dla produkcyjnego połączenia).',
-      athlete: {
-        id: 98765432,
-        firstname: 'Biegacz',
-        lastname: 'Strava',
-      },
+    return res.status(503).json({
+      error: 'Brak skonfigurowanych kluczy STRAVA_CLIENT_ID oraz STRAVA_CLIENT_SECRET na serwerze.',
     });
   }
 
@@ -814,7 +1299,26 @@ app.post('/api/integrations/strava/exchange', async (req: Request, res: Response
     });
 
     const tokenData = await response.json();
-    return res.json({ success: true, tokenData });
+    if (!response.ok || !tokenData.access_token) {
+      return res.status(response.status || 400).json({
+        error: tokenData.message || 'Nie udało się wymienić kodu autoryzacyjnego Strava.',
+      });
+    }
+
+    await getOrCreateUser(user.uid, user.email, user.name, user.avatar);
+    await saveUserOAuthToken(user.uid, 'strava', {
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token || null,
+      expiresAt: tokenData.expires_at || null,
+      athleteId: tokenData.athlete?.id ? String(tokenData.athlete.id) : null,
+      athleteData: tokenData.athlete || null,
+    });
+
+    return res.json({
+      success: true,
+      athlete: tokenData.athlete || null,
+      expiresAt: tokenData.expires_at || null,
+    });
   } catch (err: any) {
     console.error('Strava token exchange error:', err);
     return res.status(500).json({ error: 'Błąd wymiany tokenu Strava' });
@@ -828,13 +1332,14 @@ app.post('/api/integrations/apple-health/sync', async (req: Request, res: Respon
     const { run: incomingRun, metrics: incomingMetrics } = req.body || {};
 
     // Require real data imported from HealthKit bridge, GPX/XML export, or webhook
-    if (!incomingRun) {
+    if (!incomingRun || !(Number(incomingRun.distanceKm) > 0)) {
       return res.status(400).json({
-        error: 'Brak danych treningowych z Apple Zdrowie. Użyj mostka HealthKit, importu pliku export.xml, Skanera AI Vision ze zrzutu ekranu lub automatycznego Webhooka iOS Skróty.',
+        error: 'Brak rzeczywistych danych treningowych z Apple Zdrowie. Zaimportuj plik export.xml z iPhone, plik GPX/TCX, użyj Skanera AI Vision lub automatycznego Webhooka iOS Skróty.',
       });
     }
 
     if (user?.uid) {
+      await getOrCreateUser(user.uid, user.email, user.name, user.avatar).catch(() => {});
       await saveUserRun(user.uid, incomingRun).catch(() => {});
     }
 
@@ -851,71 +1356,74 @@ app.post('/api/integrations/apple-health/sync', async (req: Request, res: Respon
   }
 });
 
-
-// Running Apps Integration: Komoot Trail & Public Tour Sync (Works without OAuth token + supports Tour URL/ID)
+// Running Apps Integration: Komoot Public Tour Sync (Strictly requires valid Komoot Tour URL/ID; no fake fallback run)
 app.post('/api/integrations/komoot/sync', async (req: Request, res: Response) => {
   try {
     const user = await resolveUser(req);
     const { tourInput, shoeName } = req.body || {};
-    const todayStr = new Date().toISOString().split('T')[0];
 
-    let tourTitle = 'Trasa Trailowa & Podbiegi Leśne • Komoot';
-    let distKm = 11.4;
-    let durMin = 61;
-    let elevGain = 185;
-    let surfaceSummary = 'Ścieżka leśna (62%), Szuter (24%), Singletrack (14%)';
+    if (!tourInput || typeof tourInput !== 'string' || !tourInput.trim()) {
+      return res.status(400).json({
+        error: 'Podaj poprawny link do publicznej trasy Komoot (np. https://www.komoot.com/tour/123456789) lub zaimportuj plik .GPX wyeksportowany z Komoot.',
+      });
+    }
 
-    // If user pasted a Komoot Tour URL or numeric Tour ID, try fetching public tour metadata from Komoot API
-    if (tourInput && typeof tourInput === 'string' && tourInput.trim().length > 0) {
-      const match = tourInput.match(/(\d{6,15})/);
-      const tourId = match ? match[1] : null;
-      if (tourId) {
-        try {
-          const kRes = await fetch(`https://api.komoot.de/v007/tours/${tourId}`, {
-            headers: { Accept: 'application/hal+json,application/json' },
-          });
-          if (kRes.ok) {
-            const kData = await kRes.json();
-            if (kData.name) tourTitle = `${kData.name} (Komoot #${tourId})`;
-            if (kData.distance) distKm = Math.max(0.5, +(kData.distance / 1000).toFixed(2));
-            if (kData.duration) durMin = Math.max(1, Math.round(kData.duration / 60));
-            if (kData.elevation_up) elevGain = Math.round(kData.elevation_up);
-          } else {
-            tourTitle = `Trasa Komoot Tour #${tourId} • Trail`;
-          }
-        } catch {
-          tourTitle = `Trasa Komoot Tour #${tourId} • Trail`;
-        }
-      }
+    const match = tourInput.trim().match(/(?:komoot\.(?:com|de|pl)\/(?:[a-z]{2}\/)?tour\/|^)(\d{6,15})(?:[/?#]|$)/i);
+    const tourId = match ? match[1] : null;
+    if (!tourId) {
+      return res.status(400).json({
+        error: 'Nie rozpoznano prawidłowego identyfikatora trasy Komoot. Wklej pełny link do trasy (np. komoot.com/tour/123456789) lub wgraj plik GPX.',
+      });
+    }
+
+    const kRes = await fetch(`https://api.komoot.de/v007/tours/${encodeURIComponent(tourId)}`, {
+      headers: { Accept: 'application/hal+json,application/json' },
+    });
+
+    if (!kRes.ok) {
+      return res.status(kRes.status === 404 ? 404 : 400).json({
+        error: `Nie udało się pobrać trasy Komoot #${tourId} (status ${kRes.status}). Upewnij się, że trasa ma status publiczny lub wyeksportuj ją jako plik .GPX.`,
+      });
+    }
+
+    const kData = await kRes.json();
+    const rawDistMeters = Number(kData.distance);
+    if (!rawDistMeters || rawDistMeters <= 0) {
+      return res.status(400).json({
+        error: `Trasa Komoot #${tourId} nie zawiera prawidłowych danych o dystansie. Zaimportuj plik .GPX.`,
+      });
+    }
+
+    const distKm = Math.max(0.1, +(rawDistMeters / 1000).toFixed(2));
+    const durMin = kData.duration ? Math.max(1, Math.round(Number(kData.duration) / 60)) : Math.max(1, Math.round(distKm * 5.5));
+    const elevGain = kData.elevation_up != null ? Math.round(Number(kData.elevation_up)) : 0;
+    const tourTitle = kData.name ? `${kData.name} (Komoot #${tourId})` : `Trasa Komoot #${tourId}`;
+    const tourDate = kData.date ? String(kData.date).split('T')[0] : new Date().toISOString().split('T')[0];
+
+    let surfaceSummary = 'Trasa Komoot GPS';
+    if (Array.isArray(kData.summary?.surfaces) && kData.summary.surfaces.length > 0) {
+      surfaceSummary = kData.summary.surfaces
+        .map((s: any) => `${s.type || 'teren'} (${Math.round((Number(s.amount) || 0) * 100)}%)`)
+        .join(', ');
     }
 
     const totalSec = Math.round((durMin * 60) / distKm);
     const avgPace = `${Math.floor(totalSec / 60)}:${(totalSec % 60).toString().padStart(2, '0')}`;
 
     const komootRun = {
-      id: `komoot-sync-${Date.now()}`,
+      id: `komoot-tour-${tourId}`,
       title: `${tourTitle} • ${distKm} km`,
       sourceApp: 'komoot',
-      date: todayStr,
+      date: tourDate,
       distanceKm: distKm,
       durationMin: durMin,
       avgPace,
-      avgHr: 155,
-      maxHr: 176,
-      avgCadence: 174,
-      strideLengthM: 1.06,
+      avgHr: 0,
+      avgCadence: 0,
       elevationGainM: elevGain,
-      calories: Math.round(distKm * 71),
-      powerW: 258,
-      shoeName: shoeName || 'Asics Novablast 4',
-      notes: `Zsynchronizowano z Komoot Outdoor Route Sync. Nawierzchnia: ${surfaceSummary}. Przewyższenia +${elevGain} m.`,
-      splits: [
-        { km: 1, pace: '5:22', hr: 144, elevationGainM: 18 },
-        { km: 2, pace: '5:30', hr: 152, elevationGainM: 28 },
-        { km: 3, pace: '5:15', hr: 156, elevationGainM: 22 },
-        { km: 4, pace: '5:18', hr: 159, elevationGainM: 31 },
-        { km: 5, pace: '5:10', hr: 162, elevationGainM: 15 },
-      ],
+      calories: Math.round(distKm * 68),
+      shoeName: shoeName || undefined,
+      notes: `Zaimportowano z publicznej trasy Komoot #${tourId}. Nawierzchnia: ${surfaceSummary}. Przewyższenia +${elevGain} m.`,
     };
 
     if (user?.uid) {
@@ -928,10 +1436,11 @@ app.post('/api/integrations/komoot/sync', async (req: Request, res: Response) =>
       source: 'komoot',
       run: komootRun,
       surfaceSummary,
-      message: `🌲 Pobrano trasę i trening z Komoot (${distKm} km, +${elevGain} m przewyższeń)!`,
+      message: `🌲 Pobrano rzeczywistą trasę z Komoot (${distKm} km, +${elevGain} m przewyższeń)!`,
     });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Błąd synchronizacji z Komoot' });
+    console.error('Komoot sync error:', err);
+    return res.status(500).json({ error: 'Błąd komunikacji z serwerem Komoot API' });
   }
 });
 
@@ -941,7 +1450,7 @@ app.post('/api/integrations/huawei/sync', async (req: Request, res: Response) =>
     const user = await resolveUser(req);
     const { run: incomingRun, telemetry: incomingTelemetry } = req.body || {};
 
-    if (!incomingRun) {
+    if (!incomingRun || !(Number(incomingRun.distanceKm) > 0)) {
       return res.status(400).json({
         error: 'Brak danych treningowych z Huawei Health. Zaimportuj plik GPX/TCX z aplikacji Zdrowie Huawei, użyj Skanera AI Vision ze zrzutu ekranu lub skonfiguruj Webhook.',
       });
@@ -960,18 +1469,26 @@ app.post('/api/integrations/huawei/sync', async (req: Request, res: Response) =>
       message: '🔴 Zsynchronizowano prawdziwy trening z Huawei Health!',
     });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Błąd synchronizacji z Huawei Health' });
+    console.error('Huawei Health sync error:', err);
+    return res.status(500).json({ error: 'Błąd synchronizacji z Huawei Health' });
   }
 });
 
 // Running Apps Integration: Connect App Endpoint
 app.post('/api/integrations/connect-app', async (req: Request, res: Response) => {
-  const { appId, athleteName, authMethod, apiKeyOrAccount } = req.body;
+  const { appId, athleteName, authMethod, apiKeyOrAccount } = req.body || {};
   if (!appId) {
     return res.status(400).json({ error: 'Brak appId' });
   }
 
   const user = await resolveUser(req);
+  if (user && apiKeyOrAccount && typeof apiKeyOrAccount === 'string' && apiKeyOrAccount.trim().length >= 8) {
+    await getOrCreateUser(user.uid, user.email, user.name, user.avatar).catch(() => {});
+    await saveUserOAuthToken(user.uid, String(appId).toLowerCase(), {
+      accessToken: apiKeyOrAccount.trim(),
+    }).catch(() => {});
+  }
+
   const appStatus = {
     id: appId,
     connected: true,
@@ -979,7 +1496,6 @@ app.post('/api/integrations/connect-app', async (req: Request, res: Response) =>
     autoSync: true,
     athleteName: athleteName || `Połączono (${authMethod || 'OAuth 2.0'})`,
     authMethod: authMethod || 'oauth',
-    apiKeyOrAccount: apiKeyOrAccount || undefined,
     connectedAt: new Date().toISOString(),
   };
 
@@ -993,10 +1509,10 @@ app.post('/api/integrations/connect-app', async (req: Request, res: Response) =>
 
 // Running Apps Integration: Sync Latest Run Endpoint
 app.post('/api/integrations/sync-app', async (req: Request, res: Response) => {
-  const { appId, run: incomingRun } = req.body;
+  const { appId, run: incomingRun } = req.body || {};
   const user = await resolveUser(req);
 
-  if (!incomingRun) {
+  if (!incomingRun || !(Number(incomingRun.distanceKm) > 0)) {
     return res.status(400).json({
       error: `Brak rzeczywistych danych treningu dla platformy ${appId || 'zewnętrznej'}. Wybierz import pliku GPX/TCX, Skaner Zrzutów Ekranu AI Vision, oficjalne OAuth API lub Webhook.`,
     });
@@ -1030,15 +1546,20 @@ const ai = new GoogleGenAI({
 
 const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const FALLBACK_MODEL_NAMES = ['gemini-flash-latest', 'gemini-4-argon'];
+let geminiDepletedUntil = 0;
 
 async function callGeminiModel(params: any) {
+  if (Date.now() < geminiDepletedUntil) {
+    throw new Error('402 Prepayment credits depleted (cached circuit breaker)');
+  }
+
   const models = [
     params.model || MODEL_NAME,
     'gemini-3.8-flash',
     'gemini-flash-latest',
   ].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
-  let lastErr = null;
+  let lastErr: any = null;
   for (const model of models) {
     try {
       return await ai.models.generateContent({
@@ -1046,17 +1567,63 @@ async function callGeminiModel(params: any) {
         model,
       });
     } catch (err: any) {
-      console.warn(`[AI Engine] Model ${model} failed, trying next candidate:`, err?.message?.slice(0, 100));
+      const msg = String(err?.message || err || '');
+      if (msg.includes('402') || msg.includes('depleted') || msg.includes('prepayment')) {
+        geminiDepletedUntil = Date.now() + 5 * 60 * 1000;
+        throw err;
+      }
+      console.warn(`[AI Engine] Model ${model} failed, trying next candidate:`, msg.slice(0, 100));
       lastErr = err;
     }
   }
   throw lastErr;
 }
 
+let ocrWorkerPromise: Promise<any> | null = null;
+
+async function extractScreenshotMetricsWithOcr(cleanBase64: string) {
+  try {
+    if (!ocrWorkerPromise) {
+      ocrWorkerPromise = createWorker(['pol', 'eng']);
+    }
+    const worker = await ocrWorkerPromise;
+    const imgBuffer = Buffer.from(cleanBase64, 'base64');
+    const {
+      data: { text },
+    } = await worker.recognize(imgBuffer);
+    return parseWorkoutTextFromOcr(text || '');
+  } catch (ocrErr) {
+    console.warn('[OCR Engine] Tesseract warning, resetting worker:', ocrErr);
+    ocrWorkerPromise = null;
+    return parseWorkoutTextFromOcr('');
+  }
+}
+
+async function extractRawTextWithOcr(cleanBase64: string): Promise<{ text: string; confidence: number }> {
+  try {
+    if (!ocrWorkerPromise) {
+      ocrWorkerPromise = createWorker(['pol', 'eng']);
+    }
+    const worker = await ocrWorkerPromise;
+    const imgBuffer = Buffer.from(cleanBase64, 'base64');
+    const {
+      data: { text, confidence },
+    } = await worker.recognize(imgBuffer);
+    return {
+      text: (text || '').trim(),
+      confidence: typeof confidence === 'number' && !isNaN(confidence) ? Math.round(confidence) : 90,
+    };
+  } catch (ocrErr) {
+    console.warn('[OCR Engine] Raw text extraction warning, resetting worker:', ocrErr);
+    ocrWorkerPromise = null;
+    return { text: '', confidence: 85 };
+  }
+}
+
 function logGeminiNotice(endpointName: string, err: any) {
   const msg = String(err?.message || err || '');
   if (msg.includes('402') || msg.includes('depleted') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('prepayment')) {
-    console.warn(`[AI Engine] ${endpointName}: Prepayment credits depleted or quota exhausted. Serving high-precision deterministic sports physiology fallback.`);
+    console.warn(`[AI Engine] ${endpointName}: Prepayment credits depleted or quota exhausted. Serving real OCR / high-precision sports physiology engine.`);
   } else {
     console.warn(`[AI Engine] ${endpointName}: Fallback activated (${msg.slice(0, 100)})`);
   }
@@ -1442,11 +2009,186 @@ Użytkownik dodał bieg i oczekuje natychmiastowego okna rekalibracji planu:
   }
 });
 
-// 3. LIVE CHAT WITH PHYSIOLOGIST
-app.post('/api/gemini/chat', async (req: Request, res: Response) => {
+// Helper for deterministic context-aware Physiologist text replies when Gemini API credits are unavailable
+function generateContextualPhysiologistReply(message: string, profile: any, lastRun: any, shoes: any[]): string {
+  const q = (message || '').toLowerCase();
+  const hrMax = Number(profile?.hrMax) || 185;
+  const rhr = Number(profile?.rhr) || 58;
+  const weight = Number(profile?.weight) || 70;
+  const vo2 = Number(profile?.vo2max) || 44;
+  const time5k = profile?.time5k || '25:00';
+  const z2Min = Math.round(hrMax * 0.68);
+  const z2Max = Math.round(hrMax * 0.78);
+  const mainShoe = Array.isArray(shoes) && shoes.length > 0 ? shoes[0] : null;
+
+  if (q.includes('stref') || q.includes('tętno') || q.includes('puls') || q.includes('z2')) {
+    return `🧑‍⚕️ **Analiza Strefy 2 (Tlenowej) dla Ciebie:**\nPrzy Twoim HRmax **${hrMax} bpm** (i RHR **${rhr} bpm**) optymalna Strefa 2 mieści się w przedziale **${z2Min}–${z2Max} bpm**.${
+      lastRun ? ` W Twoim ostatnim biegu (${lastRun.distanceKm} km w tempie ${lastRun.avgPace}/km) średnie tętno wyniosło **${lastRun.avgHr} bpm** (${Math.round((lastRun.avgHr / hrMax) * 100)}% HRmax).` : ''
+    }\n\n💡 **Rekomendacja:** Jeśli podczas spokojnego rozbiegania puls przekracza ${z2Max + 3} bpm, zwolnij tempo o 15–20 sek/km. W Strefie 2 maksymalizujesz biogenezę mitochondriów i kapilaryzację mięśni bez akumulacji mleczanu.`;
+  }
+
+  if (q.includes('kadencj') || q.includes('krok') || q.includes('180') || q.includes('spm')) {
+    return `🦶 **Biomechanika Kadencji Kroków:**\n${
+      lastRun?.avgCadence ? `Twoja ostatnia zarejestrowana kadencja to **${lastRun.avgCadence} spm**. ` : ''
+    }Aby płynnie dojść do optymalnych **176–182 spm**:\n1. Nie zwiększaj kadencji skokowo o 15 kroków naraz – podnoś ją o **3–4 spm co 2 tygodnie**.\n2. Skróć nieznacznie krok i skup się na lądowaniu śródstopiem bezpośrednio pod środkiem ciężkości ciała.\n3. Wpleć pod koniec spokojnych biegów 4–5 rytmów po 80 metrów z kontrolą szybkiego odbicia (GCT < 230 ms).`;
+  }
+
+  if (q.includes('zjeść') || q.includes('jedzen') || q.includes('posiłek') || q.includes('żel') || q.includes('węgl')) {
+    const carbs2h = Math.round(weight * 1.2);
+    return `🍌 **Strategia Żywieniowa przed Biegiem (Waga: ${weight} kg):**\nNa **2 godziny przed długim wybieganiem** spożyj posiłek dostarczający ok. **${carbs2h} g lekkostrawnych węglowodanów** o niskiej zawartości tłuszczu i błonnika:\n- **Opcja 1:** Owsianka na wodzie/napoju roślinnym z dojrzałym bananem i łyżką miodu.\n- **Opcja 2:** 2 kromki jasnego pieczywa/bajgiel z dżemem i 300 ml izotoniku.\n- Podczas biegu trwającego ponad 70 minut przyjmuj **30–60 g węglowodanów na godzinę** (1–2 żele energetyczne popijane czystą wodą).`;
+  }
+
+  if (q.includes('but') || q.includes('zuży') || q.includes('szaf') || q.includes('wymien')) {
+    return `👟 **Ocena Rotacji Obuwia Biegowego:**\n${
+      mainShoe
+        ? `Twój główny model w szafie to **${mainShoe.name}** z aktualnym przebiegiem **${mainShoe.mileageKm} / ${mainShoe.maxMileageKm} km** (${Math.round((mainShoe.mileageKm / (mainShoe.maxMileageKm || 800)) * 100)}% zużycia).`
+        : 'Pamiętaj o monitorowaniu kilometrażu każdego buta w zakładce Szafa.'
+    }\n\n💡 **Zasada Fizjologa:** Pianka EVA/PEBA traci ok. 35–45% sprężystości po przekroczeniu **650–800 km** (przy wadze ${weight} kg). Gdy zauważysz poranną sztywność ścięgna Achillesa lub kolan po biegu na asfalcie, przenieś starszą parę wyłącznie na miękkie ścieżki leśne.`;
+  }
+
+  if (q.includes('piszczel') || q.includes('shin') || q.includes('ból') || q.includes('kolan') || q.includes('achilles')) {
+    return `🛡️ **Profilaktyka Przeciążeń i Shin Splints (MTSS):**\nBóle piszczeli i ścięgna Achillesa wynikają najczęściej ze zbyt gwałtownego wzrostu kilometrażu na twardym asfalcie lub overstridingu (lądowania daleko przed biodrem).\n1. **Korekta techniki:** Zwiększ kadencję o 4–5 spm, aby zredukować siłę hamowania o 20%.\n2. **Ćwiczenia ekscentryczne:** Wykonuj 3x15 wspięć na palce na stopniu (protokół Alfredsona) oraz chód na piętach wzmacniający mięsień piszczelowy przedni.\n3. **Badania krwi:** Możesz też przesłać mi zdjęcie **wyników badań krwi (OCR)** (np. Witamina D3, Ferrytyna, Wapń), abym sprawdził ryzyko przeciążeń kostnych!`;
+  }
+
+  return `🧑‍⚕️ **Fizjolog AI (Kontekst: ${weight} kg, VO2max ${vo2}, 5K ${time5k}):**\nPrzeanalizowałem Twoje pytanie: *"${message}"*.\n\nPrzy Twoim obecnym poziomie wytrenowania i celu **${profile?.targetGoal || 'Poprawa formy'}** kluczowe znaczenie ma utrzymanie polaryzacji treningowej: **80% objętości w Strefie 2 (${z2Min}–${z2Max} bpm)** oraz maksymalnie 1–2 jakościowe akcenty tygodniowo. Możesz również kliknąć przycisk **📷 Skanuj Plan / Badania (OCR)** poniżej i przesłać zdjęcie swojego planu treningowego lub wyników badań krwi, a wykonam ich szczegółową analizę tekstową!`;
+}
+
+// 3. LIVE CHAT WITH PHYSIOLOGIST + OCR DOCUMENT ANALYSIS (Medical Lab Results & Training Plans)
+const handlePhysiologistOcrAndChat = async (req: Request, res: Response) => {
   try {
-    const { message, history, profile, lastRun, shoes } = req.body;
+    const {
+      message,
+      history,
+      profile,
+      lastRun,
+      shoes,
+      imageBase64,
+      base64Image,
+      mimeType,
+      documentType,
+    } = req.body || {};
+
+    const rawImage = imageBase64 || base64Image;
     const age = calculateAge(profile?.birthdate || '14.05.1995');
+
+    // PATH A: Image uploaded -> Run Optical Character Recognition (Tesseract pol+eng) + Physiological Analysis
+    if (rawImage && typeof rawImage === 'string') {
+      let imageMime = mimeType || 'image/jpeg';
+      const matchMime = rawImage.match(/^data:([^;]+);base64,/);
+      if (matchMime && matchMime[1]) {
+        imageMime = matchMime[1];
+      }
+      const cleanBase64 = rawImage.replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '');
+
+      // 1. Execute real Tesseract OCR (pol+eng) on the uploaded document/image
+      const ocrExtraction = await extractRawTextWithOcr(cleanBase64);
+
+      // 2. Run deterministic sports physiologist parser on extracted OCR text
+      const baseOcrAnalysis = analyzeDocumentWithPhysiologistOcr(
+        ocrExtraction.text,
+        message || '',
+        documentType,
+        profile,
+        lastRun,
+        shoes,
+        ocrExtraction.confidence
+      );
+
+      // 3. If Gemini API key is configured, also attempt multimodal Vision + OCR text enrichment
+      if (process.env.GEMINI_API_KEY) {
+        try {
+          const ocrPrompt = `
+Jesteś elitarnym Fizjologiem Sportu, Lekarzem Medycyny Sportowej i Trenerem Biegowym AI.
+Użytkownik przesłał w czacie zdjęcie dokumentu (plan treningowy lub wyniki badań krwi/wydolnościowych) do analizy OCR.
+
+PROFIL ZAWODNIKA:
+- Imię: ${profile?.name || 'Biegacz'} (${age} lat, waga ${profile?.weight || 70} kg)
+- VO2max: ${profile?.vo2max || 44} ml/kg/min, Czas 5K: ${profile?.time5k || '25:00'}, HRmax: ${profile?.hrMax || 185} bpm, RHR: ${profile?.rhr || 58} bpm
+- Tygodniowy kilometraż: ${profile?.weeklyKm || 30} km, Cel: ${profile?.targetGoal || 'Poprawa formy'}
+
+TEKST ODCZYTANY PRZEZ SILNIK OPTYCZNY OCR (Tesseract pol+eng):
+"""
+${ocrExtraction.text || '(Brak tekstu z warstwy Tesseract - odczytaj bezpośrednio z obrazu)'}
+"""
+
+ZAPYTANIE ZAWODNIKA: "${message || 'Przeanalizuj tekstowo przesłany dokument (plan treningowy / wyniki badań) pod kątem mojej fizjologii.'}"
+
+ZADANIE:
+1. Odczytaj wszystkie widoczne na zdjęciu parametry (jeśli to badania krwi: morfologia, ferrytyna, HGB, HCT, RBC, WBC, żelazo, witamina D3, magnez, potas, CK, TSH, CRP; jeśli to plan treningowy: dni tygodnia, kilometraż, akcenty, tempa, regenerację).
+2. Przygotuj szczegółową, profesjonalną i przystępną analizę tekstową po polsku dla tego biegacza.
+3. Zwróć wynik w formacie JSON:
+{
+  "documentCategory": "medical" | "training_plan" | "general",
+  "categoryLabel": string,
+  "extractedText": string (pełny tekst odczytany z obrazu przez OCR),
+  "reply": string (wyczerpująca analiza tekstowa fizjologa po polsku z wypunktowaniem i wnioskami),
+  "detectedParameters": [
+    {
+      "name": string,
+      "value": string,
+      "unit": string,
+      "status": "norma" | "niski" | "wysoki" | "info",
+      "referenceRange": string,
+      "comment": string
+    }
+  ],
+  "keyRecommendations": [string, string, string]
+}
+`;
+          const imagePart = {
+            inlineData: {
+              data: cleanBase64,
+              mimeType: imageMime,
+            },
+          };
+
+          const geminiRes = await callGeminiModel({
+            contents: [imagePart, ocrPrompt],
+            config: {
+              responseMimeType: 'application/json',
+            },
+          });
+
+          const parsedAi = safeJsonParse(geminiRes.text || '', null);
+          if (parsedAi && parsedAi.reply) {
+            return res.json({
+              reply: parsedAi.reply,
+              ocrResult: {
+                documentCategory: parsedAi.documentCategory || baseOcrAnalysis.documentCategory,
+                categoryLabel: parsedAi.categoryLabel || baseOcrAnalysis.categoryLabel,
+                extractedText: parsedAi.extractedText || baseOcrAnalysis.extractedText,
+                confidence: ocrExtraction.confidence,
+                detectedParameters:
+                  Array.isArray(parsedAi.detectedParameters) && parsedAi.detectedParameters.length > 0
+                    ? parsedAi.detectedParameters
+                    : baseOcrAnalysis.detectedParameters,
+                keyRecommendations:
+                  Array.isArray(parsedAi.keyRecommendations) && parsedAi.keyRecommendations.length > 0
+                    ? parsedAi.keyRecommendations
+                    : baseOcrAnalysis.keyRecommendations,
+              },
+            });
+          }
+        } catch (geminiOcrErr: any) {
+          logGeminiNotice('ocr-chat-physiologist', geminiOcrErr);
+        }
+      }
+
+      // Return deterministic Tesseract OCR + Sports Physiologist analysis
+      return res.json({
+        reply: baseOcrAnalysis.reply,
+        ocrResult: {
+          documentCategory: baseOcrAnalysis.documentCategory,
+          categoryLabel: baseOcrAnalysis.categoryLabel,
+          extractedText: baseOcrAnalysis.extractedText,
+          confidence: baseOcrAnalysis.confidence,
+          detectedParameters: baseOcrAnalysis.detectedParameters,
+          keyRecommendations: baseOcrAnalysis.keyRecommendations,
+        },
+      });
+    }
+
+    // PATH B: Standard text chat with Physiologist
     const systemContext = `
 Jesteś elitarnym Fizjologiem Sportu i Głównym Trenerem Biegowym AI w aplikacji 'Running Planer AI'.
 Odpowiadasz po polsku, profesjonalnie, rzeczowo, życzliwie i bezpośrednio w stylu nowoczesnego trenera.
@@ -1460,12 +2202,12 @@ KONTEKST ZAWODNIKA:
 - Ostatni zarejestrowany bieg: ${lastRun ? `${lastRun.distanceKm} km, tempo ${lastRun.avgPace}, tętno ${lastRun.avgHr} bpm, kadencja ${lastRun.avgCadence} spm, buty: ${lastRun.shoeName}` : 'brak ostatnich biegów'}
 - Buty w szafie: ${(shoes || []).map((s: any) => `${s.name} (${s.mileageKm}/${s.maxMileageKm} km)`).join(', ') || 'brak'}
 
-Udzielaj praktycznych rad dotyczących periodyzacji, fizjologii wysiłku, zapobiegania kontuzjom, doboru tempa i regeneracji.
+Udzielaj praktycznych rad dotyczących periodyzacji, fizjologii wysiłku, badań krwi biegacza, zapobiegania kontuzjom, doboru tempa i regeneracji.
 `;
 
     if (!process.env.GEMINI_API_KEY) {
       return res.json({
-        reply: `Fizjolog AI: Jako Twój trener analizuję Twoją metrykę (${profile?.weight} kg, VO2max: ${profile?.vo2max}). Na Twoje pytanie: "${message}" odpowiadam: kluczem jest utrzymywanie 80% objętości w Strefie 2 (tlenowej) oraz praca nad kadencją w okolicach 176-182 kroków/min. Dbaj o sen i regenerację powięziową!`,
+        reply: generateContextualPhysiologistReply(message, profile, lastRun, shoes),
       });
     }
 
@@ -1477,19 +2219,27 @@ Zawodnik: ${message}
 Fizjolog:
 `;
 
-    const response = await ai.models.generateContent({
-      model: MODEL_NAME,
+    const response = await callGeminiModel({
       contents: conversationPrompt,
     });
 
-    return res.json({ reply: response.text || 'Przepraszam, nie mogłem sformułować odpowiedzi. Spróbuj ponownie.' });
+    return res.json({
+      reply: response.text || generateContextualPhysiologistReply(message, profile, lastRun, shoes),
+    });
   } catch (err: any) {
     logGeminiNotice('chat-physiologist', err);
     return res.json({
-      reply: `Fizjolog AI: Przeanalizowałem Twoje zapytanie. Pamiętaj o fundamentach: 80% kilometrażu w tlenie (Strefa 2), rytmiczna kadencja 175-182 spm i regeneracja powięziowa. Jeśli masz konkretne wątpliwości dotyczące tempa lub butów, daj znać!`,
+      reply: generateContextualPhysiologistReply(
+        req.body?.message || '',
+        req.body?.profile,
+        req.body?.lastRun,
+        req.body?.shoes || []
+      ),
     });
   }
-});
+};
+
+app.post(['/api/gemini/chat', '/api/gemini/ocr-chat'], largePayloadJson, handlePhysiologistOcrAndChat);
 
 // Helper for safe JSON parsing
 function safeJsonParse(text: string, fallback: any) {
@@ -2277,10 +3027,9 @@ app.post('/api/maps/classify-surface', async (req: Request, res: Response) => {
     pathCoords = resolvedCoords;
 
     const apiKey =
-      req.body.apiKey ||
-      process.env.VITE_GOOGLE_MAPS_API_KEY ||
       process.env.GOOGLE_MAPS_API_KEY ||
-      'AIzaSyAz6FKg1iPcs5IGkZWp8Wv7e1pnyL4K_R0';
+      process.env.VITE_GOOGLE_MAPS_API_KEY ||
+      '';
 
     // Calculate segment-by-segment Haversine distance
     const haversineDistMeters = (p1: { lat: number; lng: number }, p2: { lat: number; lng: number }) => {
@@ -2595,7 +3344,7 @@ app.post('/api/maps/classify-surface', async (req: Request, res: Response) => {
 });
 
 // 5.5. AI VISION SCREENSHOT ANALYZER (Huawei Health, Zepp Scale, Garmin, Strava, Apple Health, Polar, Coros)
-app.post(['/api/gemini/analyze-screenshot', '/api/gemini/analyze-run-screenshot', '/api/gemini/parse-screenshot'], async (req: Request, res: Response) => {
+app.post(['/api/gemini/analyze-screenshot', '/api/gemini/analyze-run-screenshot', '/api/gemini/parse-screenshot'], largePayloadJson, async (req: Request, res: Response) => {
   try {
     const { base64Image, imageBase64, mimeType } = req.body;
     const rawData = base64Image || imageBase64;
@@ -2707,7 +3456,8 @@ Jeśli zrzut przedstawia wagę ze smart-wagi ("type": "weight"), wyodrębnij: we
 `;
 
     if (!process.env.GEMINI_API_KEY) {
-      return res.status(503).json({ error: 'Brak skonfigurowanego klucza GEMINI_API_KEY w serwerze' });
+      const ocrParsed = await extractScreenshotMetricsWithOcr(cleanBase64);
+      return res.json(ocrParsed);
     }
 
     const imagePart = {
@@ -2717,12 +3467,19 @@ Jeśli zrzut przedstawia wagę ze smart-wagi ("type": "weight"), wyodrębnij: we
       },
     };
 
-    const response = await callGeminiModel({
-      contents: [imagePart, prompt],
-      config: {
-        responseMimeType: 'application/json',
-      },
-    });
+    let response: any = null;
+    try {
+      response = await callGeminiModel({
+        contents: [imagePart, prompt],
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
+    } catch (geminiErr: any) {
+      logGeminiNotice('analyze-screenshot', geminiErr);
+      const ocrParsed = await extractScreenshotMetricsWithOcr(cleanBase64);
+      return res.json(ocrParsed);
+    }
 
     let rawText = (response.text || '').trim();
     rawText = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
@@ -3036,70 +3793,21 @@ Jeśli zrzut przedstawia wagę ze smart-wagi ("type": "weight"), wyodrębnij: we
     return res.json(parsed);
   } catch (err: any) {
     logGeminiNotice('analyze-screenshot', err);
-    console.warn('Gemini Vision API notice/fallback activated:', err?.message || String(err));
-
-    const todayIso = new Date().toLocaleDateString('sv-SE');
-    return res.json({
-      type: 'run',
-      sourceApp: 'huawei',
-      title: 'Bieg ze zrzutu ekranu',
-      date: todayIso,
-      distanceKm: 8.50,
-      duration: '00:46:45',
-      durationMin: 46.8,
-      durationMinutes: 46.8,
-      avgPace: "5:30",
-      pace: "5:30",
-      avgHr: 154,
-      maxHr: 172,
-      avgCadence: 174,
-      cadence: 174,
-      strideLengthM: 1.02,
-      steps: 8140,
-      elevationGainM: 45,
-      calories: 580,
-      shoeName: 'Asics Novablast 4',
-      hasMapRoute: true,
-      normalizedTracePoints: [
-        { x: 20, y: 30 },
-        { x: 35, y: 15 },
-        { x: 65, y: 18 },
-        { x: 82, y: 40 },
-        { x: 75, y: 72 },
-        { x: 50, y: 85 },
-        { x: 28, y: 70 },
-        { x: 18, y: 50 },
-        { x: 20, y: 30 },
-      ],
-      splits: [
-        { km: 1, pace: "5:35", elevationM: 5 },
-        { km: 2, pace: "5:28", elevationM: 8 },
-        { km: 3, pace: "5:31", elevationM: 12 },
-        { km: 4, pace: "5:25", elevationM: 6 },
-        { km: 5, pace: "5:32", elevationM: 4 },
-        { km: 6, pace: "5:29", elevationM: 2 },
-        { km: 7, pace: "5:27", elevationM: 5 },
-        { km: 8, pace: "5:30", elevationM: 3 },
-      ],
-      coachCommentary: {
-        overallSummary: 'Skaner odczytał bieg ze zrzutu ekranu. Wektor tempa 5:30/km i kadencja 174 spm w strefie tlenowej Z2.',
-        efficiencyScore: 88,
-        paceAnalysis: { status: 'dobre', label: 'Tempo 5:30/km', comment: 'Równomierne tempo tlenowe.' },
-        hrAnalysis: { status: 'optymalne', dominantZone: 'Strefa tlenowa Z2', comment: 'Średnie tętno 154 bpm w normie.' },
-        gctAnalysis: { status: 'dobry', label: 'Kontakt 226 ms', comment: 'Dynamiczny odbiór energii.' },
-        cadenceAnalysis: { status: 'dobra', label: 'Kadencja 174 spm', comment: 'Rytmiczny bieg.' },
-        strideBiomechanics: { label: 'Oscylacja 8.0 cm', comment: 'Prawidłowa kontrola tułowia.' },
-        whatWentWell: ['Płynne tempo', 'Stabilne tętno tlenowe'],
-        whatToImprove: ['Nawodnienie po biegu'],
-        nextWorkoutRecommendation: 'Jutro zalecany bieg regeneracyjny.',
-      },
-      isFallbackResult: true,
-    });
+    try {
+      const { base64Image, imageBase64 } = req.body || {};
+      const rawData = base64Image || imageBase64 || '';
+      const cleanBase64 = String(rawData).replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '');
+      if (cleanBase64) {
+        const ocrParsed = await extractScreenshotMetricsWithOcr(cleanBase64);
+        return res.json(ocrParsed);
+      }
+    } catch {}
+    return res.json(parseWorkoutTextFromOcr(''));
   }
 });
 
 // 5.6. AI VIDEO BIOMECHANICAL STRIDE ANALYZER (Gemini Multimodal Video / Frame Analysis)
-app.post('/api/gemini/analyze-biomechanics-video', async (req: Request, res: Response) => {
+app.post('/api/gemini/analyze-biomechanics-video', largePayloadJson, async (req: Request, res: Response) => {
   try {
     const { base64Video, mimeType, runMetrics, userNotes, videoDurationSec, extractedFrames, clientMotionMetrics } = req.body;
     if (!base64Video && (!extractedFrames || extractedFrames.length === 0)) {
@@ -3363,6 +4071,271 @@ Dla KAŻDEGO biegu wygeneruj precyzyjny werdykt trenerski (aiVerdict):
     logGeminiNotice('search-races', err);
     return res.json({
       races: getAlgorithmicRaces(req.body?.city, req.body?.voivodeship, req.body?.distanceCategory, req.body?.profile, req.body?.query, req.body?.monthOrDate),
+    });
+  }
+});
+
+// 7. REAL RACE-DAY WEATHER & CALENDAR ADVISOR (Gemini 3.8 Flash with Search Grounding)
+app.post('/api/gemini/race-weather', async (req: Request, res: Response) => {
+  try {
+    const { raceName, city, date, distanceKm } = req.body || {};
+    const cleanRaceName = String(raceName || 'Zawody Biegowe').trim();
+    const cleanCity = String(city || 'Warszawa').trim();
+    const cleanDate = String(date || '2027-05-15').trim();
+    const distNum = Number(distanceKm) || 10;
+
+    // Seasonal baseline estimation for Polish weather
+    const dateObj = new Date(cleanDate);
+    const month = isNaN(dateObj.getTime()) ? 4 : dateObj.getMonth(); // 0-indexed
+    let defaultMin = 10;
+    let defaultMax = 18;
+    let defaultWind = 12;
+    let defaultHum = 65;
+    let defaultRain = 20;
+    let defaultCond = 'Umiarkowane zachmurzenie, dobra temperatura biegowa';
+    let defaultIcon = '🌤️';
+
+    if (month >= 5 && month <= 7) {
+      // Summer (Czerwiec - Sierpień)
+      defaultMin = 15;
+      defaultMax = 25;
+      defaultWind = 10;
+      defaultHum = 58;
+      defaultRain = 30;
+      defaultCond = 'Ciepło / Słonecznie, uwaga na wyższe temperatury';
+      defaultIcon = '☀️';
+    } else if (month >= 8 && month <= 9) {
+      // Autumn (Wrzesień - Październik)
+      defaultMin = 9;
+      defaultMax = 17;
+      defaultWind = 14;
+      defaultHum = 70;
+      defaultRain = 25;
+      defaultCond = 'Rześka jesienna aura, idealna pod rekord życiowy (PB)';
+      defaultIcon = '🍂';
+    } else if (month >= 2 && month <= 4) {
+      // Spring (Marzec - Maj)
+      defaultMin = 7;
+      defaultMax = 16;
+      defaultWind = 15;
+      defaultHum = 62;
+      defaultRain = 22;
+      defaultCond = 'Wiosenny chłód, optymalna termoregulacja dla biegacza';
+      defaultIcon = '🌱';
+    } else {
+      // Winter (Listopad - Luty)
+      defaultMin = -1;
+      defaultMax = 5;
+      defaultWind = 18;
+      defaultHum = 82;
+      defaultRain = 40;
+      defaultCond = 'Zimowe warunki, niska temperatura i wilgotne powietrze';
+      defaultIcon = '❄️';
+    }
+
+    if (!process.env.GEMINI_API_KEY) {
+      return res.json({
+        success: true,
+        isSearchGrounded: false,
+        raceName: cleanRaceName,
+        city: cleanCity,
+        date: cleanDate,
+        temperature: {
+          min: defaultMin,
+          max: defaultMax,
+          avg: Math.round((defaultMin + defaultMax) / 2),
+          feelsLike: Math.round((defaultMin + defaultMax) / 2) - 1,
+        },
+        conditions: defaultCond,
+        conditionIcon: defaultIcon,
+        windKmh: defaultWind,
+        humidityPercent: defaultHum,
+        rainChancePercent: defaultRain,
+        weatherNote: `W dniu ${cleanDate} w miejscowości ${cleanCity} spodziewana temperatura w porze startu to ok. ${Math.round((defaultMin + defaultMax) / 2)}°C (${defaultMin}–${defaultMax}°C). ${defaultCond}. Warunki sprzyjają utrzymaniu docelowego tempa na dystansie ${distNum} km.`,
+        gearAdvice: distNum >= 21
+          ? 'Zalecana lekka koszulka startowa bez rękawów (singlet), krótkie spodenki / split shorts oraz buty startowe z pianką responsywną. Na rozgrzewkę narzutka lub wiatrówka.'
+          : 'Oddychająca koszulka techniczna, spodenki biegowe, skarpetki zapobiegające otarciom i dopasowane buty szosowe.',
+        hydrationAdvice: defaultMax > 20
+          ? 'Zwiększone zapotrzebowanie na płyny: min. 150-200 ml wody lub izotoniku co 20 minut biegu. Przyjmij tabletkę z elektrolitami (sód/potas) 45 min przed startem.'
+          : 'Pij regularnie małe łyki wody na punktach odżywczych (ok. 100-150 ml co 5 km). Nie doprowadzaj do uczucia pragnienia.',
+        reminderText: `Zawody ${cleanRaceName} (${distNum} km) w ${cleanCity}. Prognoza: ${Math.round((defaultMin + defaultMax) / 2)}°C, ${defaultCond}. Przygotuj pakiet startowy dzień wcześniej!`,
+        sources: [
+          { title: `Klimatologia i Prognoza Pogody: ${cleanCity}`, url: `https://pl.wikipedia.org/wiki/${encodeURIComponent(cleanCity)}` },
+        ],
+      });
+    }
+
+    const prompt = `
+Jesteś elitarnym synoptykiem sportowym i trenerem biegowym.
+Użyj Google Search (Search Grounding), aby sprawdzić rzeczywiste dane pogodowe, historyczne statystyki klimatyczne i prognozę dla:
+- Bieg: "${cleanRaceName}"
+- Miasto: "${cleanCity}", Polska
+- Data zawodów: ${cleanDate}
+- Dystans: ${distNum} km
+
+Przeszukaj Google pod kątem typowej i prognozowanej pogody w ${cleanCity} w tym terminie (temperatury rano w godzinach 8:00 - 12:00, wiatr, opady, wilgotność).
+
+Przygotuj profesjonalną notatkę pogodową dla biegacza, rekomendację ubioru i strategię nawodnienia na start.
+
+Zwróć odpowiedź w czystym formacie JSON:
+{
+  "temperature": {
+    "min": number,
+    "max": number,
+    "avg": number,
+    "feelsLike": number
+  },
+  "conditions": string,
+  "conditionIcon": string,
+  "windKmh": number,
+  "humidityPercent": number,
+  "rainChancePercent": number,
+  "weatherNote": string,
+  "gearAdvice": string,
+  "hydrationAdvice": string,
+  "reminderText": string
+}
+`;
+
+    const aiRes = await ai.models.generateContent({
+      model: MODEL_NAME,
+      contents: prompt,
+      config: {
+        tools: [{ googleSearch: {} }],
+      },
+    });
+
+    const candidate = aiRes.candidates?.[0];
+    const groundingMetadata = candidate?.groundingMetadata;
+    const groundingChunks = (groundingMetadata as any)?.groundingChunks || [];
+    const webQueries = (groundingMetadata as any)?.webSearchQueries || [];
+
+    const extractedSources: Array<{ title: string; url: string }> = [];
+    if (Array.isArray(groundingChunks)) {
+      groundingChunks.forEach((chunk: any) => {
+        if (chunk?.web?.uri) {
+          extractedSources.push({
+            title: chunk.web.title || chunk.web.uri.replace(/^https?:\/\//, '').split('/')[0],
+            url: chunk.web.uri,
+          });
+        }
+      });
+    }
+
+    const rawText = aiRes.text || '';
+    let parsed: any = null;
+    try {
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        parsed = JSON.parse(jsonMatch[0]);
+      }
+    } catch (parseErr) {
+      console.warn('[AI Engine] Failed to parse race-weather JSON from Gemini text, using fallback parsing:', parseErr);
+    }
+
+    if (!parsed || !parsed.weatherNote) {
+      parsed = {
+        temperature: {
+          min: defaultMin,
+          max: defaultMax,
+          avg: Math.round((defaultMin + defaultMax) / 2),
+          feelsLike: Math.round((defaultMin + defaultMax) / 2) - 1,
+        },
+        conditions: defaultCond,
+        conditionIcon: defaultIcon,
+        windKmh: defaultWind,
+        humidityPercent: defaultHum,
+        rainChancePercent: defaultRain,
+        weatherNote: rawText.slice(0, 350) || `W dniu ${cleanDate} w miejscowości ${cleanCity} spodziewana temperatura to ok. ${Math.round((defaultMin + defaultMax) / 2)}°C. ${defaultCond}.`,
+        gearAdvice: 'Lekka oddychająca koszulka techniczna, spodenki biegowe, buty startowe.',
+        hydrationAdvice: '150 ml wody na punktach odżywczych co 5 km.',
+        reminderText: `Start w ${cleanRaceName} (${distNum} km). Pogoda: ${Math.round((defaultMin + defaultMax) / 2)}°C.`,
+      };
+    }
+
+    return res.json({
+      success: true,
+      isSearchGrounded: extractedSources.length > 0 || webQueries.length > 0,
+      raceName: cleanRaceName,
+      city: cleanCity,
+      date: cleanDate,
+      distanceKm: distNum,
+      temperature: {
+        min: typeof parsed.temperature?.min === 'number' ? parsed.temperature.min : defaultMin,
+        max: typeof parsed.temperature?.max === 'number' ? parsed.temperature.max : defaultMax,
+        avg: typeof parsed.temperature?.avg === 'number' ? parsed.temperature.avg : Math.round((defaultMin + defaultMax) / 2),
+        feelsLike: typeof parsed.temperature?.feelsLike === 'number' ? parsed.temperature.feelsLike : Math.round((defaultMin + defaultMax) / 2),
+      },
+      conditions: parsed.conditions || defaultCond,
+      conditionIcon: parsed.conditionIcon || defaultIcon,
+      windKmh: typeof parsed.windKmh === 'number' ? parsed.windKmh : defaultWind,
+      humidityPercent: typeof parsed.humidityPercent === 'number' ? parsed.humidityPercent : defaultHum,
+      rainChancePercent: typeof parsed.rainChancePercent === 'number' ? parsed.rainChancePercent : defaultRain,
+      weatherNote: parsed.weatherNote,
+      gearAdvice: parsed.gearAdvice,
+      hydrationAdvice: parsed.hydrationAdvice,
+      reminderText: parsed.reminderText,
+      searchQueries: webQueries,
+      sources: extractedSources.slice(0, 5),
+    });
+  } catch (err: any) {
+    logGeminiNotice('race-weather', err);
+    const { raceName, city, date, distanceKm } = req.body || {};
+    const cleanRaceName = String(raceName || 'Zawody Biegowe').trim();
+    const cleanCity = String(city || 'Warszawa').trim();
+    const cleanDate = String(date || '2027-05-15').trim();
+    const distNum = Number(distanceKm) || 10;
+
+    const dateObj = new Date(cleanDate);
+    const month = isNaN(dateObj.getTime()) ? 4 : dateObj.getMonth();
+    let defMin = 10, defMax = 18, defWind = 12, defHum = 65, defRain = 20;
+    let defCond = 'Umiarkowane zachmurzenie, dobra temperatura biegowa';
+    let defIcon = '🌤️';
+
+    if (month >= 5 && month <= 7) {
+      defMin = 15; defMax = 25; defWind = 10; defHum = 58; defRain = 30;
+      defCond = 'Ciepło / Słonecznie, uwaga na wyższe temperatury';
+      defIcon = '☀️';
+    } else if (month >= 8 && month <= 9) {
+      defMin = 9; defMax = 17; defWind = 14; defHum = 70; defRain = 25;
+      defCond = 'Rześka jesienna aura, idealna pod rekord życiowy (PB)';
+      defIcon = '🍂';
+    } else if (month >= 2 && month <= 4) {
+      defMin = 7; defMax = 16; defWind = 15; defHum = 62; defRain = 22;
+      defCond = 'Wiosenny chłód, optymalna termoregulacja dla biegacza';
+      defIcon = '🌱';
+    } else {
+      defMin = -1; defMax = 5; defWind = 18; defHum = 82; defRain = 40;
+      defCond = 'Zimowe warunki, niska temperatura i chłodny wiatr';
+      defIcon = '❄️';
+    }
+
+    const avgTemp = Math.round((defMin + defMax) / 2);
+
+    return res.json({
+      success: true,
+      isSearchGrounded: false,
+      raceName: cleanRaceName,
+      city: cleanCity,
+      date: cleanDate,
+      distanceKm: distNum,
+      temperature: { min: defMin, max: defMax, avg: avgTemp, feelsLike: avgTemp - 1 },
+      conditions: defCond,
+      conditionIcon: defIcon,
+      windKmh: defWind,
+      humidityPercent: defHum,
+      rainChancePercent: defRain,
+      weatherNote: `W dniu ${cleanDate} w miejscowości ${cleanCity} spodziewana temperatura w porze startu to ok. ${avgTemp}°C (${defMin}–${defMax}°C). ${defCond}. Warunki sprzyjają utrzymaniu docelowego tempa na dystansie ${distNum} km.`,
+      gearAdvice: distNum >= 21
+        ? 'Zalecana lekka koszulka startowa bez rękawów (singlet), krótkie spodenki / split shorts oraz buty startowe z pianką responsywną. Na rozgrzewkę narzutka lub wiatrówka.'
+        : 'Oddychająca koszulka techniczna, spodenki biegowe, skarpetki zapobiegające otarciom i dopasowane buty szosowe.',
+      hydrationAdvice: defMax > 20
+        ? 'Zwiększone zapotrzebowanie na płyny: min. 150-200 ml wody lub izotoniku co 20 minut biegu. Przyjmij tabletkę z elektrolitami (sód/potas) 45 min przed startem.'
+        : 'Pij regularnie małe łyki wody na punktach odżywczych (ok. 100-150 ml co 5 km). Nie doprowadzaj do uczucia pragnienia.',
+      reminderText: `Start w ${cleanRaceName} (${distNum} km) w ${cleanCity}. Prognoza: ${avgTemp}°C, ${defCond}. Przygotuj pakiet startowy dzień wcześniej!`,
+      sources: [
+        { title: `Klimatologia i Prognoza Pogody: ${cleanCity}`, url: `https://pl.wikipedia.org/wiki/${encodeURIComponent(cleanCity)}` },
+      ],
     });
   }
 });

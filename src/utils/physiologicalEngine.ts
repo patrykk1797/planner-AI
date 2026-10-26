@@ -1,4 +1,4 @@
-import { RunLog, PersonalBest, RunnerProfile } from '../types.ts';
+import type { RunLog, PersonalBest, RunnerProfile } from '../types.ts';
 import { calculateAge } from './runningMath.ts';
 
 export { calculateAge };

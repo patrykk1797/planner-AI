@@ -355,11 +355,36 @@ export interface WeatherData {
   condition: string;
 }
 
+export interface OcrExtractedParameter {
+  name: string;
+  value: string;
+  unit?: string;
+  status: 'norma' | 'niski' | 'wysoki' | 'info';
+  referenceRange?: string;
+  comment?: string;
+}
+
+export interface ChatOcrAttachmentPayload {
+  imageBase64: string;
+  mimeType?: string;
+  documentType?: 'auto' | 'medical' | 'training_plan';
+  fileName?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'model';
   text: string;
   timestamp: string;
+  imageAttachmentUrl?: string;
+  ocrResult?: {
+    documentCategory: 'medical' | 'training_plan' | 'general';
+    categoryLabel: string;
+    extractedText: string;
+    confidence?: number;
+    detectedParameters?: OcrExtractedParameter[];
+    keyRecommendations?: string[];
+  };
 }
 
 export type AchievementTier = 'bronze' | 'silver' | 'gold' | 'platinum' | 'diamond';

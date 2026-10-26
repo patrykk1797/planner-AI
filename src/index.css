@@ -21,6 +21,45 @@
   --shadow-card: 0 10px 30px -5px rgba(0, 0, 0, 0.45);
 }
 
+/* ==========================================================================
+   PLATFORM ADAPTIVE BASE & SAFE AREA SUPPORT (iOS HIG vs Android Material You)
+   ========================================================================== */
+html,
+body {
+  overscroll-behavior-y: none;
+  -webkit-overscroll-behavior-y: none;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* User select lockdown on UI to prevent accidental website-like text selection */
+body,
+button,
+nav,
+header,
+.dynamic-header-container,
+.holo-dock,
+.ios-dock,
+.m3-navigation-bar,
+[role="button"],
+[role="tab"] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Preserve user text selection in inputs, textareas, search and contenteditable */
+input,
+textarea,
+[contenteditable="true"] {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+/* Safe area padding for DynamicHeader (Dynamic Island / Notch / Android Status Bar) */
+.dynamic-header-container {
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+
 html[data-accent="orange"] {
   --accent: #ff7a00;
   --accent-soft: rgba(255, 122, 0, 0.16);
@@ -271,37 +310,183 @@ body {
   transition: all 0.2s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
-.liquid-dock {
-  background: rgba(18, 21, 30, 0.88);
-  backdrop-filter: blur(30px) saturate(190%);
-  -webkit-backdrop-filter: blur(30px) saturate(190%);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+.liquid-dock, .holo-dock, .ios-dock {
+  background: rgba(12, 15, 24, 0.78);
+  backdrop-filter: blur(35px) saturate(210%);
+  -webkit-backdrop-filter: blur(35px) saturate(210%);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 16px 36px -6px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0.5px rgba(255, 255, 255, 0.08);
   border-radius: 9999px;
+  position: relative;
+  padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
 }
 
-.dynamic-header-container {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
+html[data-theme="light"] .liquid-dock,
+html[data-theme="light"] .holo-dock,
+html[data-theme="light"] .ios-dock {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  box-shadow:
+    0 12px 32px -6px rgba(15, 23, 42, 0.14),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.9);
+}
+
+/* ==========================================================================
+   ANDROID MATERIAL YOU (M3) NAVIGATION BAR
+   ========================================================================== */
+.m3-navigation-bar {
+  background: rgba(16, 20, 29, 0.98);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.5);
+  position: relative;
   width: 100%;
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  padding-top: 0.5rem;
 }
 
-.font-brand-gondens,
-.font-brand-anton {
-  font-family: 'Saira Extra Condensed', 'Big Shoulders Display', 'Antonio', 'Teko', Impact, sans-serif;
-  font-weight: 900;
-  letter-spacing: -0.005em;
-  text-transform: uppercase;
-  line-height: 0.95;
+html[data-theme="light"] .m3-navigation-bar {
+  background: #f1f5f9;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 -4px 18px rgba(15, 23, 42, 0.08);
 }
 
-.ios27-tab-active {
-  background: var(--accent-soft);
-  border: 1px solid var(--accent-border);
-  color: var(--accent) !important;
+/* Material You Pill Indicator for Active Tab */
+.m3-pill-indicator {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  height: 32px;
   border-radius: 9999px;
+  transition: all 0.24s cubic-bezier(0.2, 0, 0, 1);
+  overflow: hidden;
+  background: transparent;
+  color: #94a3b8;
+}
+
+.m3-pill-active {
+  background-color: var(--accent);
+  color: #05070a !important;
+  box-shadow: 0 2px 10px var(--accent-soft);
+}
+
+.m3-pill-active svg {
+  color: #05070a !important;
+  stroke: #05070a !important;
+  stroke-width: 2.5;
+}
+
+/* Material Design 3 Ripple Effect */
+.m3-tab-button {
+  position: relative;
+  overflow: hidden;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.15s ease;
+}
+
+.m3-tab-button:active {
+  transform: scale(0.97);
+}
+
+.m3-tab-button::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 120%;
+  height: 120%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.25) 10%, transparent 10.01%);
+  background-repeat: no-repeat;
+  background-position: 50%;
+  transform: translate(-50%, -50%) scale(10, 10);
+  opacity: 0;
+  transition: transform 0.4s, opacity 0.5s;
+  pointer-events: none;
+}
+
+.m3-tab-button:active::after {
+  transform: translate(-50%, -50%) scale(0, 0);
+  opacity: 0.35;
+  transition: 0s;
+}
+
+html[data-theme="light"] .m3-tab-button::after {
+  background: radial-gradient(circle, rgba(15, 23, 42, 0.15) 10%, transparent 10.01%);
+}
+
+.holo-active-bubble {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 9999px;
+  pointer-events: none;
+  z-index: 0;
+  transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.holo-active-bubble::before {
+  content: "";
+  position: absolute;
+  inset: 1px 2px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.22) 0%,
+    rgba(255, 255, 255, 0.07) 55%,
+    rgba(254, 240, 138, 0.14) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  box-shadow:
+    0 4px 14px -2px rgba(0, 0, 0, 0.45),
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.55),
+    inset 0 -1.5px 2px rgba(254, 240, 138, 0.38),
+    inset 1.5px 0 2px rgba(56, 189, 248, 0.25),
+    inset -1.5px 0 2px rgba(244, 114, 182, 0.25);
+}
+
+html[data-theme="light"] .holo-active-bubble::before {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(241, 245, 249, 0.85) 60%,
+    rgba(16, 185, 129, 0.12) 100%
+  );
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  box-shadow:
+    0 4px 12px -2px rgba(15, 23, 42, 0.1),
+    inset 0 1.5px 1px rgba(255, 255, 255, 1),
+    inset 0 -1px 2px rgba(16, 185, 129, 0.25);
+}
+
+.holo-tab-item {
+  position: relative;
+  z-index: 1;
+  color: rgba(248, 250, 252, 0.78);
+  transition: color 0.2s ease, transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+html[data-theme="light"] .holo-tab-item {
+  color: #475569;
+}
+
+.holo-tab-active, .ios27-tab-active {
+  color: #fef08a !important;
+  text-shadow: 0 0 10px rgba(254, 240, 138, 0.45);
+  font-weight: 800;
+}
+
+html[data-theme="light"] .holo-tab-active,
+html[data-theme="light"] .ios27-tab-active {
+  color: #0f172a !important;
+  text-shadow: none;
+  font-weight: 800;
 }
 
 .ios27-live-bar {
@@ -512,8 +697,6 @@ input[type=range]::-webkit-slider-thumb {
 body.modal-open,
 html.modal-open {
   overflow: hidden !important;
-  height: 100% !important;
-  touch-action: none !important;
 }
 
 /* Modal centering and viewport lock */

@@ -52,67 +52,151 @@ export function parseGpxFile(
 
   // 1. Check if JSON activity format (Strava / Garmin / Polar JSON)
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    let data: any;
     try {
-      const data = JSON.parse(trimmed);
-      const item = Array.isArray(data) ? data[0] : data;
-      const distKm = item.distanceKm || (item.distance ? +(item.distance / 1000).toFixed(2) : 8.25);
-      const durMin = item.durationMin || (item.moving_time ? Math.round(item.moving_time / 60) : 41);
-      const paceTotalSec = Math.round((durMin * 60) / distKm);
-      const avgPace = item.avgPace || `${Math.floor(paceTotalSec / 60)}:${(paceTotalSec % 60).toString().padStart(2, '0')}`;
-      const avgHr = item.avgHr || Math.round(item.average_heartrate || 152);
-      const avgCadence = item.avgCadence || (item.average_cadence ? Math.round(item.average_cadence * (item.average_cadence < 120 ? 2 : 1)) : 178);
-      return {
-        pointCount: item.pointCount || 120,
-        fileName,
-        run: {
-          title: item.name || item.title || `Import JSON (${distKm} km)`,
-          sourceApp,
-          date: (item.start_date_local || item.date || new Date().toISOString()).split('T')[0],
-          distanceKm: distKm,
-          durationMin: durMin,
-          avgPace,
-          avgHr,
-          maxHr: item.maxHr || Math.round(item.max_heartrate || avgHr + 16),
-          avgCadence,
-          elevationGainM: Math.round(item.total_elevation_gain || item.elevationGainM || 45),
-          calories: item.calories || Math.round(distKm * 68),
-          shoeName,
-          notes: `Zaimportowano z pliku JSON ${fileName}.`,
-        },
-      };
+      data = JSON.parse(trimmed);
     } catch {
-      // Fall through to XML/CSV
+      throw new Error('Nieprawidłowy format pliku JSON.');
     }
+    const item = Array.isArray(data) ? data[0] : data;
+    if (!item || typeof item !== 'object') {
+      throw new Error('Plik JSON nie zawiera obiektu treningu biegowego.');
+    }
+    const rawDistKm =
+      item.distanceKm != null
+        ? Number(item.distanceKm)
+        : item.distance != null
+        ? Number(item.distance) > 200
+          ? Number(item.distance) / 1000
+          : Number(item.distance)
+        : 0;
+
+    if (!rawDistKm || isNaN(rawDistKm) || rawDistKm <= 0) {
+      throw new Error('Plik JSON nie zawiera prawidłowego dystansu biegu (distanceKm / distance).');
+    }
+
+    const distKm = +(rawDistKm.toFixed(2));
+    const rawDurMin =
+      item.durationMin != null
+        ? Number(item.durationMin)
+        : item.moving_time != null
+        ? Number(item.moving_time) / 60
+        : item.duration != null
+        ? Number(item.duration) > 300
+          ? Number(item.duration) / 60
+          : Number(item.duration)
+        : 0;
+    const durMin = rawDurMin > 0 ? Math.max(1, Math.round(rawDurMin)) : Math.max(1, Math.round(distKm * 5.5));
+    const paceTotalSec = Math.round(((rawDurMin > 0 ? rawDurMin * 60 : durMin * 60)) / distKm);
+    const avgPace =
+      item.avgPace || `${Math.floor(paceTotalSec / 60)}:${(paceTotalSec % 60).toString().padStart(2, '0')}`;
+    const avgHr = item.avgHr || item.average_heartrate ? Math.round(Number(item.avgHr || item.average_heartrate)) : 0;
+    const rawCad = item.avgCadence || item.average_cadence ? Number(item.avgCadence || item.average_cadence) : 0;
+    const avgCadence = rawCad > 0 ? Math.round(rawCad < 120 ? rawCad * 2 : rawCad) : 0;
+
+    return {
+      pointCount: Number(item.pointCount) || (Array.isArray(item.routeCoords) ? item.routeCoords.length : 1),
+      fileName,
+      run: {
+        title: item.name || item.title || `Import JSON (${distKm} km)`,
+        sourceApp,
+        date: (item.start_date_local || item.date || new Date().toISOString()).split('T')[0],
+        distanceKm: distKm,
+        durationMin: durMin,
+        avgPace,
+        avgHr,
+        maxHr: item.maxHr || item.max_heartrate ? Math.round(Number(item.maxHr || item.max_heartrate)) : undefined,
+        avgCadence,
+        elevationGainM:
+          item.total_elevation_gain != null || item.elevationGainM != null
+            ? Math.round(Number(item.total_elevation_gain ?? item.elevationGainM))
+            : 0,
+        calories: item.calories != null ? Math.round(Number(item.calories)) : Math.round(distKm * 65),
+        shoeName,
+        routeCoords: Array.isArray(item.routeCoords) ? item.routeCoords : undefined,
+        notes: `Zaimportowano z pliku JSON: ${fileName}.`,
+      },
+    };
   }
 
-  // 2. Check if CSV format (Garmin / Strava CSV)
+  // 2. Check if CSV format (Garmin / Strava / Polar CSV)
   if (!trimmed.startsWith('<') && trimmed.includes(',')) {
     const lines = trimmed.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    if (lines.length >= 2) {
-      const cols = lines[1].split(',').map((c) => c.replace(/"/g, '').trim());
-      const parsedDist = parseFloat(cols.find((c) => /^\d+\.\d+$/.test(c)) || '7.8');
-      const distKm = !isNaN(parsedDist) && parsedDist > 0 ? parsedDist : 7.8;
-      const durMin = Math.round(distKm * 5.2);
-      return {
-        pointCount: lines.length - 1,
-        fileName,
-        run: {
-          title: `Import CSV (${fileName.replace(/\.[^/.]+$/, '')})`,
-          sourceApp,
-          date: new Date().toISOString().split('T')[0],
-          distanceKm: distKm,
-          durationMin: durMin,
-          avgPace: '5:12',
-          avgHr: 151,
-          maxHr: 171,
-          avgCadence: 176,
-          elevationGainM: 38,
-          calories: Math.round(distKm * 67),
-          shoeName,
-          notes: `Zaimportowano z tabeli CSV: ${fileName} (${lines.length - 1} wierszy danych).`,
-        },
-      };
+    if (lines.length < 2) {
+      throw new Error('Plik CSV nie zawiera wierszy danych treningowych.');
     }
+    const headers = lines[0].split(',').map((h) => h.replace(/"/g, '').trim().toLowerCase());
+    const cols = lines[1].split(',').map((c) => c.replace(/"/g, '').trim());
+
+    const findCol = (keywords: string[]): string | undefined => {
+      const idx = headers.findIndex((h) => keywords.some((k) => h.includes(k)));
+      return idx >= 0 ? cols[idx] : undefined;
+    };
+
+    const distStr = findCol(['distance', 'dystans', 'km']);
+    const rawDist = distStr ? parseFloat(distStr.replace(',', '.')) : NaN;
+    if (isNaN(rawDist) || rawDist <= 0) {
+      throw new Error('W pliku CSV nie znaleziono kolumny z prawidłowym dystansem (Distance / Dystans).');
+    }
+    const distKm = +(rawDist > 200 ? rawDist / 1000 : rawDist).toFixed(2);
+
+    const timeStr = findCol(['time', 'duration', 'czas', 'moving time']);
+    let durMin = 0;
+    if (timeStr) {
+      if (timeStr.includes(':')) {
+        const parts = timeStr.split(':').map(Number);
+        if (parts.length === 3) durMin = Math.round(parts[0] * 60 + parts[1] + parts[2] / 60);
+        else if (parts.length === 2) durMin = Math.round(parts[0] + parts[1] / 60);
+      } else {
+        const n = parseFloat(timeStr.replace(',', '.'));
+        if (!isNaN(n) && n > 0) durMin = Math.round(n > 300 ? n / 60 : n);
+      }
+    }
+    if (durMin <= 0) durMin = Math.max(1, Math.round(distKm * 5.5));
+
+    const paceSec = Math.round((durMin * 60) / distKm);
+    const avgPace = `${Math.floor(paceSec / 60)}:${String(paceSec % 60).padStart(2, '0')}`;
+
+    const hrStr = findCol(['avg hr', 'average heart rate', 'heart rate', 'tętno', 'hr']);
+    const avgHr = hrStr && !isNaN(parseInt(hrStr, 10)) ? parseInt(hrStr, 10) : 0;
+
+    const maxHrStr = findCol(['max hr', 'max heart rate']);
+    const maxHr = maxHrStr && !isNaN(parseInt(maxHrStr, 10)) ? parseInt(maxHrStr, 10) : undefined;
+
+    const cadStr = findCol(['cadence', 'kadencja', 'spm']);
+    const rawCad = cadStr && !isNaN(parseInt(cadStr, 10)) ? parseInt(cadStr, 10) : 0;
+    const avgCadence = rawCad > 0 && rawCad < 120 ? rawCad * 2 : rawCad;
+
+    const elevStr = findCol(['elev', 'ascent', 'wznios', 'przewyższenie']);
+    const elevationGainM = elevStr && !isNaN(parseFloat(elevStr)) ? Math.round(parseFloat(elevStr)) : 0;
+
+    const dateStr = findCol(['date', 'data', 'start']);
+    const parsedDate =
+      dateStr && /^\d{4}-\d{2}-\d{2}/.test(dateStr)
+        ? dateStr.slice(0, 10)
+        : new Date().toISOString().split('T')[0];
+
+    const titleStr = findCol(['title', 'name', 'nazwa', 'activity']);
+
+    return {
+      pointCount: lines.length - 1,
+      fileName,
+      run: {
+        title: titleStr ? `${titleStr} • ${distKm} km` : `Import CSV (${fileName.replace(/\.[^/.]+$/, '')}) • ${distKm} km`,
+        sourceApp,
+        date: parsedDate,
+        distanceKm: distKm,
+        durationMin: durMin,
+        avgPace,
+        avgHr,
+        maxHr,
+        avgCadence,
+        elevationGainM,
+        calories: Math.round(distKm * 65),
+        shoeName,
+        notes: `Zaimportowano z pliku CSV: ${fileName}.`,
+      },
+    };
   }
 
   const parser = new DOMParser();
@@ -137,10 +221,16 @@ export function parseGpxFile(
   let lastEle: number | null = null;
   const hrValues: number[] = [];
   const cadValues: number[] = [];
+  const powerValues: number[] = [];
+  const allCoords: [number, number][] = [];
 
-  const splitBuckets: { km: number; points: { lat: number; lon: number; time?: number; hr?: number }[] }[] = [];
+  const splits: RunSplit[] = [];
   let currentKmIndex = 1;
   let distInCurrentKm = 0;
+  let kmStartTimeMs: number | null = null;
+  let kmStartEle: number | null = null;
+  let kmElevGain = 0;
+  let kmHrValues: number[] = [];
 
   let startTime: number | null = null;
   let endTime: number | null = null;
@@ -152,6 +242,10 @@ export function parseGpxFile(
     const lat = parseFloat(latAttr);
     const lon = parseFloat(lonAttr);
 
+    if (!isNaN(lat) && !isNaN(lon) && lat !== 0 && lon !== 0) {
+      allCoords.push([lat, lon]);
+    }
+
     // Time
     const timeNode = pt.querySelector('time') || pt.querySelector('Time');
     let t: number | undefined;
@@ -160,6 +254,7 @@ export function parseGpxFile(
       if (!isNaN(parsedTime)) {
         t = parsedTime;
         if (startTime === null) startTime = parsedTime;
+        if (kmStartTimeMs === null) kmStartTimeMs = parsedTime;
         endTime = parsedTime;
       }
     }
@@ -188,8 +283,11 @@ export function parseGpxFile(
     if (eleNode?.textContent) {
       const ele = parseFloat(eleNode.textContent);
       if (!isNaN(ele)) {
+        if (kmStartEle === null) kmStartEle = ele;
         if (lastEle !== null && ele > lastEle) {
-          totalElevationGainM += ele - lastEle;
+          const delta = ele - lastEle;
+          totalElevationGainM += delta;
+          kmElevGain += delta;
         }
         lastEle = ele;
       }
@@ -206,6 +304,7 @@ export function parseGpxFile(
       const hr = parseInt(hrNode.textContent, 10);
       if (!isNaN(hr) && hr > 40 && hr < 240) {
         hrValues.push(hr);
+        kmHrValues.push(hr);
       }
     }
 
@@ -224,60 +323,85 @@ export function parseGpxFile(
       }
     }
 
-    // Splits tracking
+    // Running Power (Watts) if present in GPX/TCX extensions
+    const wattsNode =
+      pt.querySelector('watts') ||
+      pt.querySelector('power') ||
+      pt.querySelector('Watts') ||
+      pt.querySelector('[nodeName="ns3:Watts"]');
+    if (wattsNode?.textContent) {
+      const w = parseInt(wattsNode.textContent, 10);
+      if (!isNaN(w) && w > 30 && w < 1000) {
+        powerValues.push(w);
+      }
+    }
+
+    // Real per-kilometer split calculation from trackpoints
     if (distInCurrentKm >= 1000) {
-      splitBuckets.push({
+      let splitPaceStr = '5:15';
+      if (t && kmStartTimeMs && t > kmStartTimeMs) {
+        const kmSec = Math.round(((t - kmStartTimeMs) / 1000) * (1000 / distInCurrentKm));
+        const pM = Math.floor(kmSec / 60);
+        const pS = kmSec % 60;
+        splitPaceStr = `${pM}:${pS < 10 ? '0' : ''}${pS}`;
+      }
+      const splitHr =
+        kmHrValues.length > 0
+          ? Math.round(kmHrValues.reduce((a, b) => a + b, 0) / kmHrValues.length)
+          : hrValues.length > 0
+          ? hrValues[hrValues.length - 1]
+          : 0;
+
+      splits.push({
         km: currentKmIndex,
-        points: [{ lat, lon, time: t, hr: hrValues[hrValues.length - 1] }],
+        pace: splitPaceStr,
+        hr: splitHr,
+        elevation: Math.round(kmElevGain),
       });
+
       currentKmIndex++;
-      distInCurrentKm = 0;
+      distInCurrentKm -= 1000;
+      kmStartTimeMs = t ?? kmStartTimeMs;
+      kmElevGain = 0;
+      kmHrValues = [];
     }
   }
 
-  const distanceKm = Math.max(0.5, +(totalDistM / 1000).toFixed(2));
-  let durationMin = 0;
-
-  if (startTime && endTime && endTime > startTime) {
-    durationMin = Math.round((endTime - startTime) / 60000);
-  } else {
-    durationMin = Math.round(distanceKm * 5.2);
+  if (totalDistM <= 0) {
+    throw new Error('Plik GPX/TCX nie zawiera prawidłowego dystansu między punktami trasy GPS.');
   }
 
-  // Pace formatting
-  let avgPace = '5:15';
-  if (distanceKm > 0 && durationMin > 0) {
-    const paceTotalSec = Math.round((durationMin * 60) / distanceKm);
-    const pMin = Math.floor(paceTotalSec / 60);
-    const pSec = paceTotalSec % 60;
-    avgPace = `${pMin}:${pSec < 10 ? '0' : ''}${pSec}`;
-  }
+  const distanceKm = Math.max(0.1, +(totalDistM / 1000).toFixed(2));
+  const totalSec =
+    startTime && endTime && endTime > startTime
+      ? Math.round((endTime - startTime) / 1000)
+      : Math.round(distanceKm * 315);
+  const durationMin = Math.max(1, Math.round(totalSec / 60));
 
-  const avgHr = hrValues.length > 0 ? Math.round(hrValues.reduce((a, b) => a + b, 0) / hrValues.length) : 154;
-  const maxHr = hrValues.length > 0 ? Math.max(...hrValues) : avgHr + 14;
-  const avgCadence = cadValues.length > 0 ? Math.round(cadValues.reduce((a, b) => a + b, 0) / cadValues.length) : 178;
+  // Pace formatting from exact elapsed seconds
+  const paceTotalSec = Math.round(totalSec / distanceKm);
+  const pMin = Math.floor(paceTotalSec / 60);
+  const pSec = paceTotalSec % 60;
+  const avgPace = `${pMin}:${pSec < 10 ? '0' : ''}${pSec}`;
 
-  // Biomechanics estimates based on cadence and pace
-  const gctMs = Math.round(270 - Math.min(50, (avgCadence - 160) * 1.5));
-  const vertOscCm = +(9.2 - Math.min(2.5, (avgCadence - 160) * 0.08)).toFixed(1);
-  const paceDecimal = durationMin / distanceKm;
-  const speedMetersPerMin = 1000 / Math.max(3.0, paceDecimal);
-  const strideLengthM = +(speedMetersPerMin / Math.max(150, avgCadence)).toFixed(2);
+  const avgHr = hrValues.length > 0 ? Math.round(hrValues.reduce((a, b) => a + b, 0) / hrValues.length) : 0;
+  const maxHr = hrValues.length > 0 ? Math.max(...hrValues) : undefined;
+  const avgCadence = cadValues.length > 0 ? Math.round(cadValues.reduce((a, b) => a + b, 0) / cadValues.length) : 0;
+  const avgPowerW =
+    powerValues.length > 0 ? Math.round(powerValues.reduce((a, b) => a + b, 0) / powerValues.length) : undefined;
 
-  // Generate splits
-  const splits: RunSplit[] = Array.from({ length: Math.max(1, Math.floor(distanceKm)) }).map((_, idx) => {
-    const kmNum = idx + 1;
-    const paceVariance = Math.round((Math.random() - 0.5) * 10);
-    const totalPaceSec = Math.max(210, Math.round((durationMin * 60) / distanceKm) + paceVariance);
-    const pM = Math.floor(totalPaceSec / 60);
-    const pS = totalPaceSec % 60;
-    return {
-      km: kmNum,
-      pace: `${pM}:${pS < 10 ? '0' : ''}${pS}`,
-      hr: Math.round(avgHr - 6 + kmNum * 1.8),
-      elevation: Math.round(totalElevationGainM / Math.max(1, Math.floor(distanceKm))),
-    };
-  });
+  // Biomechanics derived only when cadence is present
+  const gctMs = avgCadence > 0 ? Math.round(270 - Math.min(50, (avgCadence - 160) * 1.5)) : undefined;
+  const vertOscCm = avgCadence > 0 ? +(9.2 - Math.min(2.5, (avgCadence - 160) * 0.08)).toFixed(1) : undefined;
+  const speedMetersPerMin = (distanceKm * 1000) / Math.max(1, totalSec / 60);
+  const strideLengthM = avgCadence > 0 ? +(speedMetersPerMin / avgCadence).toFixed(2) : undefined;
+
+  // Downsample GPS routeCoords to max 140 points for smooth map rendering
+  const maxMapPoints = 140;
+  const step = Math.max(1, Math.ceil(allCoords.length / maxMapPoints));
+  const routeCoords: { lat: number; lng: number }[] = allCoords
+    .filter((_, idx) => idx % step === 0 || idx === allCoords.length - 1)
+    .map(([lat, lng]) => ({ lat, lng }));
 
   const trkName = xml.querySelector('trk > name')?.textContent || xml.querySelector('metadata > name')?.textContent;
   const cleanName = trkName || fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
@@ -287,11 +411,11 @@ export function parseGpxFile(
     pointCount: pts.length,
     fileName,
     run: {
-      title: cleanName.length > 3 ? `${cleanName} • ${distanceKm} km` : `Trening GPS (${distanceKm} km)`,
+      title: cleanName.length > 2 ? `${cleanName} • ${distanceKm} km` : `Trening GPS (${distanceKm} km)`,
       sourceApp,
       date: activityDate,
       distanceKm,
-      durationMin: Math.max(1, durationMin),
+      durationMin,
       avgPace,
       avgHr,
       maxHr,
@@ -299,22 +423,25 @@ export function parseGpxFile(
       strideLengthM,
       gctMs,
       verticalOscillationCm: vertOscCm,
-      groundContactBalancePercent: '50.1% L / 49.9% P',
-      verticalRatioPercent: 7.4,
       elevationGainM: Math.round(totalElevationGainM),
-      calories: Math.round(distanceKm * 68),
-      powerW: Math.round(238 + Math.random() * 20),
+      calories: Math.round(distanceKm * 65),
+      powerW: avgPowerW,
       shoeName,
-      notes: `Zaimportowano z pliku ${fileName} (${pts.length} punktów GPS, śr. HR: ${avgHr} bpm, kadencja: ${avgCadence} spm, krok: ${strideLengthM} m).`,
-      splits,
+      routeCoords: routeCoords.length >= 2 ? routeCoords : undefined,
+      notes: `Zaimportowano z pliku ${fileName} (${pts.length} punktów GPS${avgHr > 0 ? `, śr. HR: ${avgHr} bpm` : ''}${avgCadence > 0 ? `, kadencja: ${avgCadence} spm` : ''}).`,
+      splits: splits.length > 0 ? splits : undefined,
       analysis: {
-        whatWentWell: ['Zweryfikowany ślad GPS z pliku aktywności', `Średnia kadencja ${avgCadence} spm i krok ${strideLengthM} m`],
-        whatWentWrong: ['Kontroluj tętno na podbiegach w drugiej połowie dystansu'],
+        whatWentWell: [
+          `Zweryfikowany ślad GPS (${pts.length} pkt, ${distanceKm} km)`,
+          ...(avgCadence > 0 ? [`Średnia kadencja ${avgCadence} spm${strideLengthM ? ` i krok ${strideLengthM} m` : ''}`] : []),
+        ],
+        whatWentWrong: [],
         planAdaptation: 'Bieg włączony do bilansu obciążenia mikrocyklu.',
         trainingLoad: Math.round(distanceKm * 8.5),
-        readinessImpact: 'Obciążenie tlenowe zrealizowane zgodnie z założeniami',
+        readinessImpact: 'Obciążenie tlenowe zrealizowane zgodnie z zapisem GPS',
       },
     },
   };
 }
+
 

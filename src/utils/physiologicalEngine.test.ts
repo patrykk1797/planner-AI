@@ -7,7 +7,7 @@ import {
   checkAndUpdatePersonalBests,
   calculateRunRewards,
 } from './physiologicalEngine.ts';
-import { RunLog, RunnerProfile, PersonalBest } from '../types.ts';
+import type { RunLog, RunnerProfile, PersonalBest } from '../types.ts';
 
 test('calculateAgeCategory assigns correct categories for men and women', () => {
   // Birthdate 1995-05-14 (around 31 years old)

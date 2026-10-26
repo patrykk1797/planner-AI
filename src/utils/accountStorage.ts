@@ -1,5 +1,6 @@
 import type { RunnerProfile, TrainingDay, RunLog, Shoe, PersonalBest, UserAccount, RaceSlot } from '../types.ts';
 import { safeLocalStorageSet, sanitizeRunForStorage } from './storage.ts';
+import { getAuthHeaders } from '../lib/firebase.ts';
 
 export interface UserSettings {
   subscriptionTier: 'PRO' | 'LITE';
@@ -224,15 +225,17 @@ export const saveAccountData = (userId: string, data: Partial<UserAccountData>):
     const sanitizedCombined = sanitizeRunForStorage(combined);
     safeLocalStorageSet(primaryKey, JSON.stringify(sanitizedCombined));
 
-    // Silently sync full user progress to Cloud SQL database for permanent multi-device restoration
-    fetch('/api/db/user-data', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-user-id': userId,
-      },
-      body: JSON.stringify(sanitizedCombined),
-    }).catch(() => {});
+    // Silently sync full user progress to Cloud SQL database only when authenticated via Firebase
+    getAuthHeaders({ 'Content-Type': 'application/json' })
+      .then((headers) => {
+        if (!headers) return;
+        return fetch('/api/db/user-data', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(sanitizedCombined),
+        });
+      })
+      .catch(() => {});
   } catch (e) {
     console.error('Error saving account data for:', userId, e);
   }

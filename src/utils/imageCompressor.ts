@@ -118,7 +118,19 @@ export async function optimizeImageForVision(
       };
 
       img.onerror = () => {
-        reject(new Error('Failed to load image for optimization'));
+        if (typeof source === 'string') {
+          resolve({ base64Image: source, mimeType: 'image/png' });
+        } else {
+          const fallbackReader = new FileReader();
+          fallbackReader.onload = (ev) => {
+            resolve({
+              base64Image: (ev.target?.result as string) || '',
+              mimeType: source.type || 'image/png',
+            });
+          };
+          fallbackReader.onerror = () => reject(new Error('Nie udało się odczytać pliku obrazu'));
+          fallbackReader.readAsDataURL(source);
+        }
       };
 
       if (typeof source === 'string') {

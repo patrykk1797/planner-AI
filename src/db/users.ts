@@ -1,6 +1,43 @@
+import crypto from 'crypto';
 import { db } from './index.ts';
-import { users, profiles, runs } from './schema.ts';
-import { eq, desc, or } from 'drizzle-orm';
+import { users, profiles, runs, oauthTokens } from './schema.ts';
+import { eq, desc, or, and } from 'drizzle-orm';
+
+function getOAuthEncryptionKey(): Buffer {
+  const secret =
+    process.env.OAUTH_ENCRYPTION_KEY ||
+    process.env.OAUTH_STATE_SECRET ||
+    'treda-oauth-aes256-gcm-key-v1';
+  return crypto.createHash('sha256').update(secret).digest();
+}
+
+export function encryptOAuthSecret(plainText: string): string {
+  if (!plainText || plainText.startsWith('enc:v1:')) return plainText;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', getOAuthEncryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `enc:v1:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+export function decryptOAuthSecret(cipherText: string | null | undefined): string | null {
+  if (!cipherText) return null;
+  if (!cipherText.startsWith('enc:v1:')) return cipherText;
+  try {
+    const parts = cipherText.split(':');
+    if (parts.length !== 5) return cipherText;
+    const iv = Buffer.from(parts[2], 'hex');
+    const authTag = Buffer.from(parts[3], 'hex');
+    const encrypted = Buffer.from(parts[4], 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', getOAuthEncryptionKey(), iv);
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch (err) {
+    console.error('Failed to decrypt OAuth token:', err);
+    return null;
+  }
+}
 
 export async function getOrCreateUser(uid: string, email: string, name?: string, avatar?: string) {
   try {
@@ -112,12 +149,31 @@ export async function saveUserRun(uid: string, runData: any) {
 export async function deleteUserRun(uid: string, rawRunId: string) {
   try {
     const runId = rawRunId.startsWith(`${uid}_`) ? rawRunId : `${uid}_${rawRunId}`;
-    await db.delete(runs).where(or(eq(runs.id, rawRunId), eq(runs.id, runId)));
+    await db
+      .delete(runs)
+      .where(and(eq(runs.userId, uid), or(eq(runs.id, rawRunId), eq(runs.id, runId))));
     return true;
   } catch (error) {
     console.error('Failed to delete user run from Cloud SQL:', error);
     throw new Error('Database run delete failed', { cause: error });
   }
+}
+
+function extractCleanTargetGoal(rawGoal: any): string {
+  if (!rawGoal) return 'Budowa bazy tlenowej';
+  if (typeof rawGoal === 'string') {
+    if (rawGoal.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(rawGoal);
+        if (typeof parsed.targetGoal === 'string' && !parsed.targetGoal.startsWith('{')) {
+          return parsed.targetGoal;
+        }
+      } catch {}
+      return 'Budowa bazy tlenowej';
+    }
+    return rawGoal;
+  }
+  return 'Budowa bazy tlenowej';
 }
 
 export async function saveUserProfile(uid: string, profileData: any) {
@@ -126,9 +182,14 @@ export async function saveUserProfile(uid: string, profileData: any) {
     const existingList = await db.select().from(profiles).where(eq(profiles.userId, uid));
     const existing = existingList[0];
 
-    const rawGoal = profileData.targetGoal !== undefined 
-      ? profileData.targetGoal 
+    const rawGoal = profileData.targetGoal !== undefined
+      ? profileData.targetGoal
       : (existing?.targetGoal || 'Budowa bazy tlenowej');
+
+    const cleanGoal = extractCleanTargetGoal(rawGoal);
+    const stateJsonVal = profileData.stateJson !== undefined
+      ? (typeof profileData.stateJson === 'string' ? profileData.stateJson : JSON.stringify(profileData.stateJson))
+      : (existing?.stateJson || (typeof rawGoal === 'string' && rawGoal.startsWith('{') ? rawGoal : null));
 
     const name = profileData.name !== undefined ? profileData.name : (existing?.name || null);
     const city = profileData.city !== undefined ? profileData.city : (existing?.city || null);
@@ -153,7 +214,8 @@ export async function saveUserProfile(uid: string, profileData: any) {
       hrMax,
       rhr,
       weeklyKm,
-      targetGoal: typeof rawGoal === 'object' ? JSON.stringify(rawGoal) : rawGoal,
+      targetGoal: cleanGoal,
+      stateJson: stateJsonVal,
       accentColor,
       theme,
       updatedAt: new Date(),
@@ -174,6 +236,7 @@ export async function saveUserProfile(uid: string, profileData: any) {
           rhr: valuesObj.rhr,
           weeklyKm: valuesObj.weeklyKm,
           targetGoal: valuesObj.targetGoal,
+          stateJson: valuesObj.stateJson,
           accentColor: valuesObj.accentColor,
           theme: valuesObj.theme,
           updatedAt: new Date(),
@@ -188,9 +251,14 @@ export async function saveUserProfile(uid: string, profileData: any) {
   }
 }
 
-export async function saveFullUserData(uid: string, data: any) {
+export async function saveFullUserData(uid: string, rawData: any) {
   try {
-    // 1. Fetch existing full state first so we never wipe existing data during updates!
+    const data =
+      rawData && typeof rawData === 'object' && rawData.userData
+        ? { ...rawData, ...rawData.userData }
+        : rawData || {};
+
+    // 1. Fetch existing full state first so partial updates preserve other fields
     const existingFull = await getFullUserData(uid).catch(() => null);
 
     const profileObj = {
@@ -198,36 +266,54 @@ export async function saveFullUserData(uid: string, data: any) {
       ...(data.profile || {}),
     };
 
-    const mergedShoes = (Array.isArray(data.shoes) && data.shoes.length > 0)
+    const mergedShoes = Array.isArray(data.shoes)
       ? data.shoes
       : (existingFull?.shoes || []);
 
-    const mergedPlan = (Array.isArray(data.plan) && data.plan.length > 0)
+    const mergedPlan = Array.isArray(data.plan)
       ? data.plan
       : (existingFull?.plan || []);
 
-    const mergedPbs = (Array.isArray(data.personalBests) && data.personalBests.length > 0)
+    const mergedPbs = Array.isArray(data.personalBests)
       ? data.personalBests
       : (existingFull?.personalBests || []);
+
+    const mergedRaces = Array.isArray(data.races)
+      ? data.races
+      : (existingFull?.races || []);
+
+    const mergedWeeklyFocus = data.weeklyFocus !== undefined
+      ? data.weeklyFocus
+      : (existingFull?.weeklyFocus || null);
+
+    const mergedPlanSummary = data.planSummary !== undefined
+      ? data.planSummary
+      : (existingFull?.planSummary || null);
 
     const mergedSettings = data.settings || existingFull?.settings || null;
     const mergedAccount = data.account || existingFull?.account || null;
 
-    // Store full state JSON payload inside target_goal text column without schema changes
+    const cleanGoal = extractCleanTargetGoal(profileObj.targetGoal);
+    profileObj.targetGoal = cleanGoal;
+
+    // Store full state JSON payload inside dedicated state_json column
     const fullStatePayload = JSON.stringify({
-      targetGoal: profileObj.targetGoal || 'Budowa bazy tlenowej',
+      targetGoal: cleanGoal,
       profile: profileObj,
       shoes: mergedShoes,
       plan: mergedPlan,
       personalBests: mergedPbs,
+      races: mergedRaces,
+      weeklyFocus: mergedWeeklyFocus,
+      planSummary: mergedPlanSummary,
       settings: mergedSettings,
       account: mergedAccount,
     });
 
-    // Save profile with targetGoal holding the JSON state
     await saveUserProfile(uid, {
       ...profileObj,
-      targetGoal: fullStatePayload,
+      targetGoal: cleanGoal,
+      stateJson: fullStatePayload,
     });
 
     // Save individual runs to runs table
@@ -254,14 +340,20 @@ export async function getFullUserData(uid: string) {
     const runsList = await getUserRuns(uid);
 
     let parsedState: any = {};
-    let realTargetGoal = userProfile?.targetGoal || 'Budowa bazy tlenowej';
+    let realTargetGoal = extractCleanTargetGoal(userProfile?.targetGoal);
 
-    if (userProfile?.targetGoal && userProfile.targetGoal.startsWith('{')) {
+    const rawJsonSource =
+      userProfile?.stateJson ||
+      (userProfile?.targetGoal && userProfile.targetGoal.startsWith('{') ? userProfile.targetGoal : null);
+
+    if (rawJsonSource) {
       try {
-        parsedState = JSON.parse(userProfile.targetGoal);
-        if (parsedState.targetGoal) realTargetGoal = parsedState.targetGoal;
+        parsedState = JSON.parse(rawJsonSource);
+        if (parsedState.targetGoal) {
+          realTargetGoal = extractCleanTargetGoal(parsedState.targetGoal);
+        }
       } catch (e) {
-        console.error('Error parsing targetGoal JSON:', e);
+        console.error('Error parsing profile stateJson:', e);
       }
     }
 
@@ -292,6 +384,9 @@ export async function getFullUserData(uid: string) {
       shoes: parsedState.shoes || [],
       plan: parsedState.plan || [],
       personalBests: parsedState.personalBests || [],
+      races: parsedState.races || [],
+      weeklyFocus: parsedState.weeklyFocus || null,
+      planSummary: parsedState.planSummary || null,
       settings: parsedState.settings || null,
       account: parsedState.account || null,
     };
@@ -344,11 +439,17 @@ export async function getAllDatabaseUsersWithStats() {
       const uRuns = runsByUser.get(uid) || [];
 
       let parsedState: any = {};
-      let realTargetGoal = pRow?.targetGoal || 'Budowa bazy tlenowej';
-      if (pRow?.targetGoal && pRow.targetGoal.startsWith('{')) {
+      let realTargetGoal = extractCleanTargetGoal(pRow?.targetGoal);
+      const rawJsonSource =
+        pRow?.stateJson ||
+        (pRow?.targetGoal && pRow.targetGoal.startsWith('{') ? pRow.targetGoal : null);
+
+      if (rawJsonSource) {
         try {
-          parsedState = JSON.parse(pRow.targetGoal);
-          if (parsedState.targetGoal) realTargetGoal = parsedState.targetGoal;
+          parsedState = JSON.parse(rawJsonSource);
+          if (parsedState.targetGoal) {
+            realTargetGoal = extractCleanTargetGoal(parsedState.targetGoal);
+          }
         } catch {}
       }
 
@@ -484,6 +585,13 @@ export async function adminUpdateUserInDb(
 
 export async function adminDeleteUserFromDb(uid: string): Promise<boolean> {
   try {
+    // 0. Delete user OAuth tokens
+    try {
+      await db.delete(oauthTokens).where(eq(oauthTokens.userId, uid));
+    } catch (e) {
+      console.warn('Error deleting oauth_tokens for user:', uid, e);
+    }
+
     // 1. Delete user runs
     try {
       await db.delete(runs).where(eq(runs.userId, uid));
@@ -531,5 +639,125 @@ export async function findUserByEmail(email: string) {
     return { found: false };
   }
 }
+
+export interface OAuthTokenInput {
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresAt?: number | null;
+  scope?: string | null;
+  athleteId?: string | null;
+  athleteData?: any;
+}
+
+export async function saveUserOAuthToken(
+  uid: string,
+  provider: string,
+  tokenData: OAuthTokenInput
+) {
+  const cleanProvider = provider.trim().toLowerCase();
+  const recordId = `${uid}_${cleanProvider}`;
+  const athleteJson =
+    tokenData.athleteData !== undefined && tokenData.athleteData !== null
+      ? typeof tokenData.athleteData === 'string'
+        ? tokenData.athleteData
+        : JSON.stringify(tokenData.athleteData)
+      : null;
+
+  const values = {
+    id: recordId,
+    userId: uid,
+    provider: cleanProvider,
+    accessToken: encryptOAuthSecret(tokenData.accessToken),
+    refreshToken: tokenData.refreshToken ? encryptOAuthSecret(tokenData.refreshToken) : null,
+    expiresAt: tokenData.expiresAt != null ? Math.round(Number(tokenData.expiresAt)) : null,
+    scope: tokenData.scope || null,
+    athleteId: tokenData.athleteId != null ? String(tokenData.athleteId) : null,
+    athleteData: athleteJson,
+    updatedAt: new Date(),
+  };
+
+  const result = await db
+    .insert(oauthTokens)
+    .values(values)
+    .onConflictDoUpdate({
+      target: oauthTokens.id,
+      set: {
+        accessToken: values.accessToken,
+        ...(values.refreshToken ? { refreshToken: values.refreshToken } : {}),
+        ...(values.expiresAt != null ? { expiresAt: values.expiresAt } : {}),
+        ...(values.scope ? { scope: values.scope } : {}),
+        ...(values.athleteId ? { athleteId: values.athleteId } : {}),
+        ...(values.athleteData ? { athleteData: values.athleteData } : {}),
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+
+  const saved = result[0];
+  return {
+    ...saved,
+    accessToken: decryptOAuthSecret(saved.accessToken) || tokenData.accessToken,
+    refreshToken: decryptOAuthSecret(saved.refreshToken),
+  };
+}
+
+export async function getUserOAuthToken(uid: string, provider: string) {
+  const cleanProvider = provider.trim().toLowerCase();
+  const recordId = `${uid}_${cleanProvider}`;
+  const rows = await db
+    .select()
+    .from(oauthTokens)
+    .where(or(eq(oauthTokens.id, recordId), and(eq(oauthTokens.userId, uid), eq(oauthTokens.provider, cleanProvider))));
+
+  if (!rows || rows.length === 0) return null;
+  const row = rows[0];
+  let parsedAthlete: any = null;
+  if (row.athleteData) {
+    try {
+      parsedAthlete = JSON.parse(row.athleteData);
+    } catch {
+      parsedAthlete = null;
+    }
+  }
+  return {
+    ...row,
+    accessToken: decryptOAuthSecret(row.accessToken) || '',
+    refreshToken: decryptOAuthSecret(row.refreshToken),
+    athlete: parsedAthlete,
+  };
+}
+
+export async function getUserOAuthConnections(uid: string) {
+  const rows = await db.select().from(oauthTokens).where(eq(oauthTokens.userId, uid));
+  return rows.map((row) => {
+    let parsedAthlete: any = null;
+    if (row.athleteData) {
+      try {
+        parsedAthlete = JSON.parse(row.athleteData);
+      } catch {
+        parsedAthlete = null;
+      }
+    }
+    return {
+      provider: row.provider,
+      connected: true,
+      athleteId: row.athleteId,
+      athlete: parsedAthlete,
+      scope: row.scope,
+      expiresAt: row.expiresAt,
+      updatedAt: row.updatedAt,
+    };
+  });
+}
+
+export async function deleteUserOAuthToken(uid: string, provider: string) {
+  const cleanProvider = provider.trim().toLowerCase();
+  const recordId = `${uid}_${cleanProvider}`;
+  await db
+    .delete(oauthTokens)
+    .where(or(eq(oauthTokens.id, recordId), and(eq(oauthTokens.userId, uid), eq(oauthTokens.provider, cleanProvider))));
+  return true;
+}
+
 
 

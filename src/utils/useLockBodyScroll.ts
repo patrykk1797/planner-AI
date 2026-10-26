@@ -1,31 +1,37 @@
 import { useEffect } from 'react';
 
+let activeLockCount = 0;
+
+function unlockBodyScrollCompletely() {
+  if (typeof document === 'undefined') return;
+  document.body.classList.remove('modal-open');
+  document.documentElement.classList.remove('modal-open');
+  document.body.style.overflow = '';
+  document.documentElement.style.overflow = '';
+  document.body.style.position = '';
+  document.body.style.touchAction = '';
+  document.documentElement.style.touchAction = '';
+}
+
 /**
- * Custom hook to lock body & html scrolling and touch-actions when a modal is active.
- * Ensures the background is completely frozen and the modal remains centered in the viewport.
+ * Custom hook to lock background body & html scrolling when a modal is active.
+ * Uses reference counting so nested or transitioning modals never leave the page scroll-locked.
  */
 export function useLockBodyScroll(isOpen: boolean = true) {
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || typeof document === 'undefined') return;
 
-    const originalBodyOverflow = document.body.style.overflow;
-    const originalHtmlOverflow = document.documentElement.style.overflow;
-    const originalBodyPosition = document.body.style.position;
-    const originalTouchAction = document.body.style.touchAction;
-
+    activeLockCount += 1;
     document.body.classList.add('modal-open');
     document.documentElement.classList.add('modal-open');
     document.body.style.overflow = 'hidden';
     document.documentElement.style.overflow = 'hidden';
-    document.body.style.touchAction = 'none';
 
     return () => {
-      document.body.classList.remove('modal-open');
-      document.documentElement.classList.remove('modal-open');
-      document.body.style.overflow = originalBodyOverflow;
-      document.documentElement.style.overflow = originalHtmlOverflow;
-      document.body.style.position = originalBodyPosition;
-      document.body.style.touchAction = originalTouchAction;
+      activeLockCount = Math.max(0, activeLockCount - 1);
+      if (activeLockCount === 0) {
+        unlockBodyScrollCompletely();
+      }
     };
   }, [isOpen]);
 }

@@ -51,13 +51,30 @@ export const profiles = pgTable('profiles', {
   rhr: integer('rhr'),
   weeklyKm: integer('weekly_km'),
   targetGoal: text('target_goal'),
+  stateJson: text('state_json'),
   accentColor: text('accent_color'),
   theme: text('theme'),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 
+export const oauthTokens = pgTable('oauth_tokens', {
+  id: text('id').primaryKey(), // Format: `${userId}_${provider}`
+  userId: text('user_id')
+    .references(() => users.uid)
+    .notNull(),
+  provider: text('provider').notNull(), // 'strava' | 'polar' | 'garmin' | 'komoot' | 'huawei'
+  accessToken: text('access_token').notNull(),
+  refreshToken: text('refresh_token'),
+  expiresAt: integer('expires_at'), // Unix epoch seconds
+  scope: text('scope'),
+  athleteId: text('athlete_id'),
+  athleteData: text('athlete_data'), // JSON serialized athlete metadata
+  updatedAt: timestamp('updated_at').defaultNow(),
+});
+
 export const usersRelations = relations(users, ({ many, one }) => ({
   runs: many(runs),
+  oauthTokens: many(oauthTokens),
   profile: one(profiles, {
     fields: [users.uid],
     references: [profiles.userId],
@@ -71,9 +88,17 @@ export const runsRelations = relations(runs, ({ one }) => ({
   }),
 }));
 
+export const oauthTokensRelations = relations(oauthTokens, ({ one }) => ({
+  user: one(users, {
+    fields: [oauthTokens.userId],
+    references: [users.uid],
+  }),
+}));
+
 export const profilesRelations = relations(profiles, ({ one }) => ({
   user: one(users, {
     fields: [profiles.userId],
     references: [users.uid],
   }),
 }));
+

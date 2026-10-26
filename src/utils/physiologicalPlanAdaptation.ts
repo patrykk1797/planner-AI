@@ -1,5 +1,5 @@
 import { TrainingDay, RunLog, RunnerProfile } from '../types.ts';
-import { PlanRecalibrationData } from '../components/PlanRecalibrationModal.tsx';
+import { PlanRecalibrationData } from '../components/modals/PlanRecalibrationModal.tsx';
 
 /**
  * Deterministic Sports Physiology Engine:

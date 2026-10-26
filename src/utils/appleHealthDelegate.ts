@@ -138,13 +138,13 @@ export const registerGlobalHealthKitDelegates = (config: HealthKitDelegateConfig
     onBiometricsReceived: (rawBiometrics: HKBiometricMetricsSample) => {
       console.log('🍏 [HealthKit Delegate] Received Biometrics:', rawBiometrics);
       const metrics: HealthSyncMetrics = {
-        stepsToday: rawBiometrics.stepsTodayCount || 12450,
-        restingHeartRate: rawBiometrics.restingHeartRateBpm || 52,
-        sleepHours: rawBiometrics.sleepHoursCount || 7.8,
-        activeCalories: rawBiometrics.activeEnergyBurnedKcal || 650,
-        vo2MaxEst: rawBiometrics.vo2MaxMlKgMin || 52.5,
+        stepsToday: rawBiometrics.stepsTodayCount ?? 0,
+        restingHeartRate: rawBiometrics.restingHeartRateBpm ?? 0,
+        sleepHours: rawBiometrics.sleepHoursCount ?? 0,
+        activeCalories: rawBiometrics.activeEnergyBurnedKcal ?? 0,
+        vo2MaxEst: rawBiometrics.vo2MaxMlKgMin ?? 0,
         lastSyncTime: 'Dzisiaj, ' + new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
-        sourceDevice: 'Apple Watch Ultra & iOS HealthKit',
+        sourceDevice: 'Apple Watch & iOS HealthKit',
       };
       if (config.onBiometricsReceived) {
         config.onBiometricsReceived(metrics);
